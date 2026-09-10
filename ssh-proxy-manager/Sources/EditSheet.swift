@@ -86,11 +86,14 @@ struct EditSheet: View {
                             .disabled(draft.forwards.count <= 1)
                         }
                         .font(.system(size: 12))
-                        Text(draft.direction == .reverse
-                             ? "远端 bind 地址默认 127.0.0.1；要让远端听 0.0.0.0，需要远端 sshd 开 GatewayPorts。"
-                             : "正向往外连：把本机端口指向远端服务；D 类型只填本地端口，走 SOCKS。")
-                            .font(.system(size: 11))
-                            .foregroundStyle(.secondary)
+                        VStack(alignment: .leading, spacing: 3) {
+                            ForEach(directionNotes, id: \.self) { note in
+                                Text("• " + note)
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
                     }
 
                     section("行为") {
@@ -133,7 +136,7 @@ struct EditSheet: View {
             }
             .padding(14)
         }
-        .frame(width: 620, height: 620)
+        .frame(width: 640, height: 680)
     }
 
     private func commit() {
@@ -174,39 +177,111 @@ struct EditSheet: View {
 
     @ViewBuilder
     private func forwardRow(forward: Binding<Forward>) -> some View {
-        HStack(spacing: 8) {
-            if draft.direction == .forward {
-                Picker("", selection: forward.type) {
-                    Text("L").tag("L")
-                    Text("D").tag("D")
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .bottom, spacing: 8) {
+                captioned("类型", width: 52) {
+                    if draft.direction == .forward {
+                        Picker("", selection: forward.type) {
+                            Text("L").tag("L")
+                            Text("D").tag("D")
+                        }
+                        .labelsHidden()
+                    } else {
+                        Text("R")
+                            .font(.system(size: 12, weight: .semibold))
+                    }
                 }
-                .labelsHidden()
-                .frame(width: 52)
-            } else {
-                Text("R")
-                    .font(.system(size: 12, weight: .semibold))
-                    .frame(width: 52)
+                captioned(listenCaption, width: 122) {
+                    TextField("127.0.0.1", text: forward.bindHost)
+                }
+                captioned(listenPortCaption, width: 84) {
+                    TextField("0", value: forward.bindPort, format: .number)
+                }
+                if forward.wrappedValue.isSOCKS {
+                    captioned("目标", width: 200) {
+                        Text("SOCKS 代理，目标由客户端指定")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer(minLength: 0)
+                } else {
+                    Image(systemName: "arrow.right")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                        .padding(.bottom, 5)
+                    captioned(destCaption, width: 122) {
+                        TextField("127.0.0.1", text: forward.destHost)
+                    }
+                    captioned("目标端口", width: 84) {
+                        TextField("0", value: forward.destPort, format: .number)
+                    }
+                }
             }
-
-            TextField(draft.direction == .reverse ? "远端地址" : "本机地址", text: forward.bindHost)
-                .frame(width: 110)
-            TextField(draft.direction == .reverse ? "远端端口" : "本机端口", value: forward.bindPort, format: .number)
-                .frame(width: 78)
-
-            if forward.wrappedValue.isSOCKS {
-                Text("SOCKS，无需目标")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                Spacer()
-            } else {
-                Image(systemName: "arrow.right")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.secondary)
-                TextField("目标主机", text: forward.destHost)
-                TextField("目标端口", value: forward.destPort, format: .number)
-                    .frame(width: 78)
-            }
+            Text(preview(for: forward.wrappedValue))
+                .font(.system(size: 10.5, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
+    }
+
+    private var listenCaption: String {
+        draft.direction == .reverse ? "远端监听地址" : "本机监听地址"
+    }
+
+    private var listenPortCaption: String {
+        draft.direction == .reverse ? "远端监听端口" : "本机监听端口"
+    }
+
+    private var destCaption: String {
+        draft.direction == .reverse ? "本机目标地址" : "远端目标地址"
+    }
+
+    private var directionNotes: [String] {
+        switch draft.direction {
+        case .reverse:
+            return [
+                "链路：访问者 → 远端 \(remoteHostLabel) 的监听端口 →（ssh 隧道）→ 你这台 Mac 的目标地址:端口。",
+                "远端监听地址写 127.0.0.1 时只有远端机器自己能连；要让别的机器连，得填 0.0.0.0 或远端网卡 IP，并且远端 sshd 要开 GatewayPorts。",
+                "目标地址是在本机侧连接的：127.0.0.1 就是这台 Mac，也可以写本机能访问到的内网地址。",
+                "远端监听端口被占用时 ssh 会立刻退出，内核按退避策略重试，连续失败 5 次后转为「已失败」。",
+                "ssh 没有「远端 SOCKS」：-D 只有本地版本，反向只能一条条配固定目标。要在远端用 SOCKS，就先在本机开一个 SOCKS（正向 -D），再用一条反向代理把那个端口暴露到远端。",
+                "例：把本机 Chrome 调试端口暴露到远端 → 远端 127.0.0.1:9223 转发到本机 127.0.0.1:9222。",
+            ]
+        case .forward:
+            return [
+                "链路：本机监听端口 →（ssh 隧道）→ 远端服务器能访问到的目标地址:端口。",
+                "L（本地转发）：本机这个端口固定通向一个目标，目标在建定义时写死；连接由远端 sshd 发起，所以目标名/地址是远端能访问到的。",
+                "D（动态转发）：本机这个端口是 SOCKS4/SOCKS5 代理，目标由连上来的程序运行时指定，一个端口覆盖任意目标；客户端必须支持 SOCKS（浏览器、curl --socks5）。",
+                "本机监听地址写 127.0.0.1 时只有本机能连；填 0.0.0.0 等于把端口/代理开放给同网段，谨慎。",
+                "例：L → 本机 127.0.0.1:8080 通向远端内网 192.168.179.3:8080；D → 本机 127.0.0.1:1080 做 SOCKS 出口。",
+            ]
+        }
+    }
+
+    private var remoteHostLabel: String {
+        Target.parse(sshSpec)?.host ?? "远端服务器"
+    }
+
+    private func preview(for forward: Forward) -> String {
+        switch (draft.direction, forward.isSOCKS) {
+        case (.reverse, _):
+            return "\(remoteHostLabel) \(forward.bindHost):\(forward.bindPort)  ⇄  本机 \(forward.destHost):\(forward.destPort)"
+        case (.forward, true):
+            return "本机 \(forward.bindHost):\(forward.bindPort) 提供 SOCKS5 代理"
+        default:
+            return "本机 \(forward.bindHost):\(forward.bindPort)  ⇄  远端可达的 \(forward.destHost):\(forward.destPort)"
+        }
+    }
+
+    @ViewBuilder
+    private func captioned(_ caption: String, width: CGFloat, @ViewBuilder field: () -> some View) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(caption)
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+            field()
+        }
+        .frame(width: width, alignment: .leading)
     }
 
     @ViewBuilder

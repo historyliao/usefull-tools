@@ -365,7 +365,9 @@ func (m *Manager) Stop(name string) error {
 	inst.runtime.PID = 0
 	inst.runtime.GuardPID = 0
 	inst.runtime.ProcStart = ""
+	inst.runtime.ProcCmdline = ""
 	inst.runtime.GuardStart = ""
+	inst.runtime.GuardCmdline = ""
 	inst.runtime.StartedAt = time.Time{}
 	m.mu.Unlock()
 	m.emit(store.Event{Name: name, Kind: "stop"})
@@ -422,8 +424,8 @@ func (m *Manager) Reconcile() []string {
 		if !stateActive(rt.State) {
 			continue
 		}
-		guardKilled := killRecorded(rt.GuardPID, rt.GuardStart)
-		sshKilled := killRecorded(rt.PID, rt.ProcStart)
+		guardKilled := killRecorded(rt.GuardPID, rt.GuardStart, rt.GuardCmdline)
+		sshKilled := killRecorded(rt.PID, rt.ProcStart, rt.ProcCmdline)
 		if guardKilled || sshKilled {
 			cleaned = append(cleaned, name)
 		}
@@ -438,6 +440,10 @@ func (m *Manager) Reconcile() []string {
 			inst.runtime.State = store.StateStopped
 			inst.runtime.PID = 0
 			inst.runtime.GuardPID = 0
+			inst.runtime.ProcStart = ""
+			inst.runtime.ProcCmdline = ""
+			inst.runtime.GuardStart = ""
+			inst.runtime.GuardCmdline = ""
 			inst.runtime.LastError = "上一轮 manager 退出后残留，已回收"
 		}
 	}
@@ -576,8 +582,10 @@ func (m *Manager) spawn(inst *instance, gen int) error {
 	inst.runtime.State = store.StateRunning
 	inst.runtime.GuardPID = cmd.Process.Pid
 	inst.runtime.GuardStart = startTimeOf(cmd.Process.Pid)
+	inst.runtime.GuardCmdline = cmdlineOf(cmd.Process.Pid)
 	inst.runtime.PID = sshPID
 	inst.runtime.ProcStart = startTimeOf(sshPID)
+	inst.runtime.ProcCmdline = cmdlineOf(sshPID)
 	inst.runtime.StartedAt = inst.startedAt
 	inst.runtime.LastError = ""
 	message := fmt.Sprintf("pid=%d guard=%d %s", sshPID, cmd.Process.Pid, def.ForwardsDisplay())
@@ -622,7 +630,9 @@ func (m *Manager) handleExit(inst *instance, gen, code, signal int, cause error)
 	inst.runtime.PID = 0
 	inst.runtime.GuardPID = 0
 	inst.runtime.ProcStart = ""
+	inst.runtime.ProcCmdline = ""
 	inst.runtime.GuardStart = ""
+	inst.runtime.GuardCmdline = ""
 	inst.runtime.LastExitCode = &code
 	inst.runtime.LastExitAt = now
 	message := exitMessage(code, signal, cause)
@@ -811,11 +821,27 @@ func startTimeOf(pid int) string {
 	return strings.TrimSpace(string(out))
 }
 
-func killRecorded(pid int, recordedStart string) bool {
+func cmdlineOf(pid int) string {
+	if pid <= 0 {
+		return ""
+	}
+	out, err := exec.Command("/bin/ps", "-ww", "-o", "command=", "-p", strconv.Itoa(pid)).Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// killRecorded 只在 pid、启动时间、cmdline 三者全部对得上时才动手，
+// 避免 PID 复用后误杀无关进程；旧版本 state 里没有 cmdline 时退化为两项校验。
+func killRecorded(pid int, recordedStart, recordedCmdline string) bool {
 	if pid <= 0 || recordedStart == "" || !processAlive(pid) {
 		return false
 	}
 	if startTimeOf(pid) != recordedStart {
+		return false
+	}
+	if recordedCmdline != "" && cmdlineOf(pid) != recordedCmdline {
 		return false
 	}
 	_ = syscall.Kill(-pid, syscall.SIGTERM)
@@ -824,7 +850,7 @@ func killRecorded(pid int, recordedStart string) bool {
 	}
 	_ = syscall.Kill(-pid, syscall.SIGKILL)
 	waitGone(pid, time.Second)
-	return true
+	return !processAlive(pid)
 }
 
 func backoffDelay(b config.Backoff, attempt int) time.Duration {

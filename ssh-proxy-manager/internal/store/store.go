@@ -26,7 +26,9 @@ type Runtime struct {
 	PID          int       `json:"pid,omitempty"`
 	GuardPID     int       `json:"guard_pid,omitempty"`
 	ProcStart    string    `json:"proc_start_time,omitempty"`
+	ProcCmdline  string    `json:"proc_cmdline,omitempty"`
 	GuardStart   string    `json:"guard_start_time,omitempty"`
+	GuardCmdline string    `json:"guard_cmdline,omitempty"`
 	StartedAt    time.Time `json:"started_at,omitempty"`
 	Restarts     int       `json:"restarts"`
 	LastExitCode *int      `json:"last_exit_code,omitempty"`

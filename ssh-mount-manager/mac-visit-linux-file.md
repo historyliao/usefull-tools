@@ -75,26 +75,52 @@ user          = lyy
 Mac 挂载点    = ~/mnt/remote-docs
 ```
 
+本机实测用的真实环境（2026-09-10 验证通过，命令与结论均以此为准）：
+
+```text
+Linux server  = hhdev（117.50.113.135，SSH 端口 12880）
+user          = lyy
+文档目录      = /data/lyy/taishan/docs
+Mac 挂载点    = ~/mnt/remote-docs
+```
+
 ### 2.1 安装 macFUSE 与 SSHFS
 
 两者独立安装，缺一不可：
 
 ```bash
+brew trust gromgit/fuse          # Homebrew 6 需先信任该 tap，否则 tap 会直接失败
 brew install --cask macfuse
 brew install gromgit/fuse/sshfs-mac
 ```
 
-macFUSE 属于系统级扩展，安装后需要在「系统设置 → 隐私与安全性」里允许其加载，并可能需要重启一次，否则 `sshfs` 挂载会失败。
+macFUSE 属于系统级扩展，安装后需要在「系统设置 → 隐私与安全性」里允许开发者 **Benjamin Fleischer** 的系统软件，然后重启一次；否则 `sshfs` 挂载会失败，并弹出「来自开发者 Benjamin Fleischer 的系统软件已被阻止载入」。
+
+重启之后 kext **不会自动出现**，需要按需加载。macFUSE 自带入口可以自查和手动加载：
+
+```bash
+MACFUSE=/Library/Filesystems/macfuse.fs/Contents/Resources/macfuse.app/Contents/MacOS/macfuse
+"$MACFUSE" kernel-extension check      # 输出 Kernel extension not loaded 表示尚未加载
+sudo "$MACFUSE" kernel-extension load  # 手动加载；重跑挂载命令通常也会触发，但本机未单独验证
+kmutil showloaded | grep -i macfuse    # 期望看到 io.macfuse.filesystems.macfuse.25
+```
 
 ### 2.2 版本搭配注意事项（重要）
 
 **不要看到“最新版”就无脑全升**，macFUSE 与 SSHFS 必须作为一组一起确认：
 
 - macFUSE 官方仍在维护，5.3.3 是稳定版；5.4.0（2026-09-07）是开发预览版，不建议直接用于日常。
-- SSHFS 官方当前版本为 3.7.5。
+- SSHFS 官方当前版本为 3.7.5，Homebrew tap（`gromgit/fuse/sshfs-mac`）已提供 3.7.6。
 - **已知回归问题**：SSHFS 3.7.5 在 macFUSE **5.3.3** 上可能无法正常挂载，降回 **5.3.2** 即可恢复。该问题在 macFUSE issue tracker（issue #1180）中仍是 open 状态。
 
-结论：如果挂载报错或直接挂不上，先检查版本这一组搭配，优先尝试 `macFUSE 5.3.2 + SSHFS 3.7.5`。
+本机在 `macFUSE 5.3.3 + SSHFS 3.7.6` 上实测到该回归的两种具体表现，都可以在命令层绕开：
+
+| 表现 | 触发条件 | 处理 |
+| --- | --- | --- |
+| `sshfs` 执行后**不返回**，一直停在前台 | 该版本组合下 sshfs 不再自行后台化 | 命令加 `-f`，并放到 tmux / 后台运行（见步骤 2） |
+| `ls` / `find` 触发断言 `Assertion failed: (offset == 0), function sftp_readdir_async, file sshfs.c, line 2321`，随后挂载变死挂载（`Device not configured`） | 使用 `-o dir_cache=no` | 去掉 `dir_cache=no`，改用默认目录缓存 + `-o dcache_timeout=5`（见步骤 2） |
+
+结论：如果挂载报错或直接挂不上，先检查版本这一组搭配。**不一定要靠版本回退解决**——按步骤 2 的命令调整即可正常使用；若想彻底规避这个回归，再降回 `macFUSE 5.3.2`。
 
 ---
 
@@ -113,11 +139,25 @@ mkdir -p ~/mnt/remote-docs
 推荐的基础挂载命令（面向“只读阅读、目录常变”的场景）：
 
 ```bash
+# 该版本组合下 sshfs 不会自行后台化，所以必须加 -f 并放在 tmux / 后台里跑
 sshfs lyy@10.10.10.20:/home/lyy/docs ~/mnt/remote-docs \
+  -f \
   -o reconnect \
   -o volname=remote-docs \
   -o noappledouble \
-  -o dir_cache=no
+  -o dcache_timeout=5
+```
+
+本机实测通过的命令（对照替换成真实环境）：
+
+```bash
+sshfs lyy@117.50.113.135:/data/lyy/taishan/docs ~/mnt/remote-docs \
+  -f \
+  -o reconnect \
+  -o volname=remote-docs \
+  -o noappledouble \
+  -o dcache_timeout=5 \
+  -p 12880
 ```
 
 各参数作用：
@@ -126,10 +166,11 @@ sshfs lyy@10.10.10.20:/home/lyy/docs ~/mnt/remote-docs \
 | --- | --- | --- |
 | `lyy@10.10.10.20:/home/lyy/docs` | 远端 `用户@主机:目录` | 指定要映射的 Linux 目录，即文档产生端 |
 | `~/mnt/remote-docs` | 本地挂载点 | 之后 Mac 侧统一用这个路径访问 |
+| `-f` | 前台运行，不尝试后台化 | macFUSE 5.3.3 下 sshfs 的后台化已损坏，不加会卡住不返回；配合 tmux / 后台执行 |
 | `-o reconnect` | 断线后自动重连 | 网络抖动或休眠恢复后，尽量自动恢复挂载，避免手动重挂 |
 | `-o volname=remote-docs` | 设置 Finder 中显示的卷名 | 让 Finder 侧边栏显示的是一眼能认出的名字，而不是长命令 |
 | `-o noappledouble` | 禁止生成 AppleDouble 元数据文件 | 保证远端目录不被写入 `._xxx` 这类文件，维持“原封不动” |
-| `-o dir_cache=no` | 关闭目录项缓存 | 让 Linux 新建的文件在 Mac 再次访问目录时能被重新查询到，保证“远端一改，本地可见” |
+| `-o dcache_timeout=5` | 目录项缓存 5 秒超时 | 兼顾“远端一改，本地可见”（实测 1 秒内可见）与稳定性；**不要用 `dir_cache=no`** |
 
 关于 `noappledouble` 的定位：它不只是“减少垃圾文件”，更是分层原则的一部分——传输层不应该往远端目录里写入任何东西，包括 macOS 的元数据文件。
 
@@ -145,7 +186,13 @@ dcache_link_timeout
 dcache_dir_timeout
 ```
 
-对于几十到几百个 Markdown / HTML 的文档目录，性能根本不是瓶颈，所以第一版直接用 `-o dir_cache=no` 最简单可靠，用性能换取“随时看到最新文件”。
+第一版曾用 `-o dir_cache=no` 追求“随时看到最新文件”，但实测在 `macFUSE 5.3.3 + SSHFS 3.7.6` 上会触发 sshfs 断言崩溃（`sftp_readdir_async`，`offset == 0`），挂载随即变成死挂载，反而更不可靠。正确做法是保留默认目录缓存、把超时压短：
+
+```text
+-o dcache_timeout=5      # 目录项缓存 5 秒，实测远端新建文件 1 秒内本地可见
+```
+
+对于几十到几百个 Markdown / HTML 的文档目录，这点缓存不会造成实际困扰，而它能避开上面那个崩溃。
 
 ### 步骤 3：打开 HTML
 
@@ -237,6 +284,8 @@ alias docs='open ~/mnt/remote-docs'
 
 如果希望开机或登录后自动挂载，可以把上面的 `sshfs` 命令做成 launchd 任务或登录脚本。建议先用前几步手动跑通、确认版本搭配无误之后，再自动化，避免挂载失败被隐藏。
 
+注意：因为该版本组合下 sshfs 不会自行后台化，自动化时应让 `sshfs -f` 作为**长期存活的进程**运行（由 launchd / tmux 托管），而不是写成会立刻返回的短命令；否则命令虽然“成功”，挂载点拿不到有效会话。
+
 ### 步骤 7：卸载
 
 正常卸载：
@@ -250,6 +299,17 @@ umount ~/mnt/remote-docs
 ```bash
 diskutil unmount force ~/mnt/remote-docs
 ```
+
+如果 sshfs 进程异常退出，`mount` 表里会残留**死挂载**：`ls ~/mnt/remote-docs` 报
+`Device not configured`，但 `mount | grep remote-docs` 仍能看到条目。实测这种状态下直接执行 `umount` 就能清掉（`diskutil unmount force` 反而会报 `Unmount failed`）：
+
+```bash
+umount ~/mnt/remote-docs
+mount | grep remote-docs || echo "挂载项已清除"
+ls -la ~/mnt/remote-docs        # 应恢复为空目录
+```
+
+清掉后重新执行步骤 2 的挂载命令即可，不需要重启。
 
 断开 SSH 连接后挂载会失效，文件也不会占用 Mac 磁盘空间。
 
@@ -311,6 +371,14 @@ Mac 浏览器 ──http://127.0.0.1:8080──▶ SSH 隧道 ──▶ Linux �
 按顺序逐层验证，任一步失败即可定位问题所在层。
 
 ### 测试 1：挂载是否成功
+
+先确认内核扩展这一层：
+
+```bash
+kmutil showloaded | grep -i macfuse    # 期望 io.macfuse.filesystems.macfuse.25
+```
+
+若没有输出，说明 kext 尚未加载（重启后不会自动出现），按 2.1 的 `kernel-extension load` 手动加载后再继续。
 
 ```bash
 mount | grep remote-docs
@@ -378,7 +446,7 @@ open ~/mnt/remote-docs/report.html # 浏览器刷新后是否看到新内容
 
 预期：
 
-- 新建文件能出现在 `~/mnt/remote-docs`（依赖 `dir_cache=no`；若用默认缓存，可能需要等待缓存超时）。
+- 新建文件能出现在 `~/mnt/remote-docs`（`-o dcache_timeout=5`，本机实测 1 秒内即可见；缓存设得更长则需等待超时）。
 - HTML 修改后刷新浏览器即可看到新内容。
 
 ### 测试 6：断线重连与稳定性
@@ -407,13 +475,37 @@ ls -la ~/mnt/remote-docs       # 应恢复为空目录
 
 | 现象 | 可能原因 | 处理 |
 | --- | --- | --- |
-| `sshfs` 挂载直接失败 | macFUSE 扩展未允许 / 未重启 | 系统设置中允许 macFUSE 扩展并重启 |
-| 5.3.3 上挂载异常 | macFUSE 5.3.3 回归问题 | 降到 macFUSE 5.3.2 |
-| Linux 新建文件 Mac 看不到 | 目录缓存 | 使用 `-o dir_cache=no` 或等待缓存超时 |
+| 系统弹「来自开发者 Benjamin Fleischer 的系统软件已被阻止载入」 | kext 未获批准 | 系统设置 → 隐私与安全性 → 允许，然后重启 |
+| 重启后 `sshfs` 挂载失败、`kmutil showloaded` 看不到 macfuse | kext 按需加载，重启后不会自动出现 | `sudo macfuse kernel-extension load` 手动加载后再挂载 |
+| `sshfs` 执行后一直不返回、停在前台 | macFUSE 5.3.3 下 sshfs 不再自行后台化（issue #1180） | 命令加 `-f`，放到 tmux / 后台运行 |
+| `ls` / `find` 触发 `Assertion failed: (offset == 0), function sftp_readdir_async` 后挂载变 `Device not configured` | 使用了 `-o dir_cache=no` | 去掉该参数，改用 `-o dcache_timeout=5` |
+| 5.3.3 上仍有其它挂载异常 | macFUSE 5.3.3 回归问题 | 降到 macFUSE 5.3.2 |
+| `brew install gromgit/fuse/sshfs-mac` 报 tap 不可信 / `invalid syntax in tap` | Homebrew 6 默认不信任第三方 tap | 先执行 `brew trust gromgit/fuse` |
+| Linux 新建文件 Mac 看不到 | 目录缓存未超时 | 使用 `-o dcache_timeout=5`，或等待缓存超时 |
 | `.md` 打开仍是纯文本 / 下载 | Markdown 插件未启用，或未开“允许访问文件网址” | 启用插件并打开 file URL 访问权限 |
 | `.md` 里的图片不显示 | 插件改变了页面基准 URL，相对路径失效 | 改用相对文档根 / 绝对 `file://` 路径，或源端转 HTML |
 | 远端目录出现 `._` 文件 | AppleDouble 元数据 | 挂载参数加 `-o noappledouble` |
 | 卸载报设备忙 | 有进程占用挂载点 | `diskutil unmount force ~/mnt/remote-docs` |
+| `ls` 报 `Device not configured`、`mount` 里却有残留条目 | sshfs 异常退出导致死挂载 | `umount ~/mnt/remote-docs`（实测 `diskutil unmount force` 会报 `Unmount failed`） |
+
+---
+
+## 七、本机实测记录（2026-09-10）
+
+环境：macOS 26.0.1 (25A362) / Apple Silicon / macFUSE 5.3.3 / SSHFS 3.7.6 / Homebrew 6.0.6
+远端：hhdev = `lyy@117.50.113.135:12880`，文档目录 `/data/lyy/taishan/docs`
+
+| 验证项 | 判据 | 实测结果 |
+| --- | --- | --- |
+| kext 加载 | `kmutil showloaded \| grep -i macfuse` | `io.macfuse.filesystems.macfuse.25 (5.3.3)` |
+| 挂载成功 | `mount \| grep remote-docs` | 显示 `macfuse` 类型挂载项，目录条目正常 |
+| 内容逐字节一致 | 远端 `md5sum` vs 本地 `md5 -r` | 均为 `1030a2e0c89b06f3967725e8b184bd1a`（apiserver.md） |
+| 无元数据污染 | 远端 `find ... -name "._*"` | `._` 文件数 0（`noappledouble` 生效） |
+| 远端改动可见 | 远端 `touch` 新文件后本地 `ls` | 1 秒内可见；远端追加内容本地立即可读 |
+| 全目录遍历 | `find ~/mnt/remote-docs -type f \| wc -l` | 128 个文件正常返回，无 `sftp_readdir_async` 断言 |
+| 死挂载清理 | sshfs 异常退出后 `umount ~/mnt/remote-docs` | 挂载项清除，挂载点恢复为空目录，无需重启 |
+
+未覆盖：HTML 渲染（该文档目录里没有 `.html` 文件）、`.md` 浏览器渲染（需自行安装 Markdown 插件并允许 file URL，见步骤 4）。
 
 ---
 

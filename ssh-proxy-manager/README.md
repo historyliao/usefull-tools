@@ -1,11 +1,24 @@
 # ssh-proxy-manager (spm)
 
-管理 `ssh -N -R 127.0.0.1:9223:127.0.0.1:9222 lyy@hhdev` 这类隧道的单二进制工具：
-**带 TUI 的前台管理器，TUI 进程本身就是 manager**。打开它就开工作台，退出它就把所有隧道一起收走。
+管理 `ssh -N -R 127.0.0.1:9223:127.0.0.1:9222 lyy@hhdev` 这类隧道：**原生 macOS 界面 App + Go 内核**。
+代理分**正向代理**（本地端口 → 远端服务）和**反向代理**（远端端口 → 本机服务）两类。
+
+打开界面就开工作台，退出界面就把所有隧道一起收走——界面进程崩了也一样（内核靠 stdin 断裂感知）。
 
 设计取舍与不变量见 [DESIGN.md](DESIGN.md)。
 
 ## 安装
+
+界面 App（推荐，内核已打包在里面，不需要另外装 `spm`）：
+
+```bash
+cd ssh-proxy-manager
+make build          # 产出 build/SSH Proxy Manager.app
+make run            # 直接打开
+open "build/SSH Proxy Manager.app"
+```
+
+只想用命令行：
 
 ```bash
 cd ssh-proxy-manager
@@ -17,12 +30,27 @@ sudo install -m 0755 spm /usr/local/bin/spm && rm spm   # 可选：装成全局�
 
 ## 快速开始
 
+### 图形界面
+
+```bash
+make run
+```
+
+右上角「新建代理」→ 选类型（正向/反向）→ 填名称、SSH 目标、端口映射 → 创建。列表按方向分成两个分区，
+每行右侧的按钮直接启停，选中后右侧是详情与日志。常用操作：全部启动/全部停止、编辑、删除、菜单栏图标里快速启停、
+`⌘N` 新建。
+
+### 命令行
+
 ```bash
 # 1) 只写定义，此时不会启动任何东西
 spm create --name chrome-9223 --ssh hhdev -R 127.0.0.1:9223:127.0.0.1:9222
 
-# 2) 打开工作台：autostart 的条目会自动被拉起
-spm
+# 2) 打开界面；autostart 的条目会自动被拉起
+spm ui
+
+# 或者不用界面，直接在终端里托管
+spm run
 ```
 
 `--ssh` 支持三种写法，都会原样交给 ssh 处理，所以 `~/.ssh/config` 里的别名、User、Port、ProxyJump 都照常生效：
@@ -33,12 +61,24 @@ lyy@hhdev          # 只写用户
 lyy@117.50.113.135:12880
 ```
 
+## 正向代理与反向代理
+
+| 方向 | 用法 | 转发 | 举例 |
+| --- | --- | --- | --- |
+| 反向代理 | 把远端端口映射到本机服务 | `-R 远端地址:远端端口:本机目标:目标端口` | `-R 127.0.0.1:9223:127.0.0.1:9222`：远端 9223 → 本机 Chrome 调试端口 9222 |
+| 正向代理 | 把本机端口映射到远端服务 | `-L 本机地址:本机端口:远端目标:目标端口` | `-L 127.0.0.1:8080:192.168.179.3:8080`：本机 8080 → 远端内网 8080 |
+| 正向代理 | 本机 SOCKS 代理 | `-D 本机地址:本机端口` | `-D 127.0.0.1:1080` |
+
+同一条定义只能属于一个方向，不能把 `-R` 和 `-L/-D` 混在一起（创建时会直接报错，请拆成两条）。
+
 ## 命令
 
 | 命令 | 说明 |
 | --- | --- |
-| `spm`（或 `spm tui`） | 打开 TUI，即 manager 本体 |
-| `spm run` | 无界面 supervisor，行为和 TUI 一致，便于脚本化与排障 |
+| `spm ui` | 打开界面 App |
+| `spm run [--watch-stdin]` | 无界面内核（后台托管隧道）；`--watch-stdin` 供界面托管用 |
+| `spm`（或 `spm tui`） | 终端界面（备用） |
+| `spm start\|stop\|restart <name>` | 让运行中的内核启停某条代理 |
 | `spm create ...` | 只写定义，不启动（别名 `add`） |
 | `spm list [--json]` | 定义 + 运行态只读展示（别名 `ls`） |
 | `spm delete <name>` | 删除定义（别名 `rm`/`remove`） |
@@ -85,11 +125,13 @@ spm create --name anvil-s3 \
 
 ## 必须知道的几条语义
 
-1. **生命周期绑定**：`q` 退出、Ctrl-C、SIGHUP、关掉终端窗口、`kill -9`、进程崩溃——任何一条路径下，manager 管理的隧道都会在数秒内被终止，远端监听端口随之释放。误关终端窗口等于隧道全断，这是设计语义，不是缺陷。
-2. **同时只能有一个 manager**：`spm` 与 `spm run` 互斥（`~/.ssh-proxy-manager/lock` 独占锁）。`create` / `list` / `delete` / `logs` 不占锁，可以在 manager 运行期间从另一个终端使用，改动会在 5 秒内被 manager 同步：外部新增的条目不会自动启动，外部删除的条目会被 manager 停掉并移除。
-3. **隧道进程的 stdin 是 `/dev/null`**：密码与私钥口令必须走 ssh-agent，host key 必须已在 known_hosts，否则会启动失败并进入退避重启。manager 自身不碰任何凭据。
-4. **只纳管自己拉起的隧道**：在 tmux 里手工起的 `ssh -N` 不会被接管，也不会被清理。
-5. **`autostart` 的时机是 manager 启动时**，不是 `create` 时。在 TUI 里新建条目后需要按 `s` 启动。
+1. **生命周期绑定**：退出 App、`q` 退出终端界面、Ctrl-C、关掉终端窗口、`kill -9`、进程崩溃——任何一条路径下，内核管理的隧道都会在数秒内被终止，远端监听端口随之释放。这是设计语义，不是缺陷。
+2. **关闭窗口 ≠ 退出**：关窗口隧道继续跑（App 留在菜单栏）；点「退出」或 `⌘Q` 才收走全部隧道。
+3. **App 与内核的关系**：App 发现没有内核在跑就自己拉起一个（退出 App 一起收走）；内核已经在跑时（比如你先在终端 `spm run`）App 直接附加过去，此时退出 App 不影响隧道。
+4. **同时只能有一个内核**：`~/.ssh-proxy-manager/lock` 是独占锁，App 与 `spm run` / `spm`（终端界面）互斥。`create` / `list` / `delete` / `logs` 直接读写文件不占锁；`start` / `stop` / `restart` 走控制通道请内核代劳，也不占锁。
+5. **隧道进程的 stdin 是 `/dev/null`**：密码与私钥口令必须走 ssh-agent，host key 必须已在 known_hosts，否则会启动失败并进入退避重启。内核自身不碰任何凭据。
+6. **只纳管自己拉起的隧道**：在 tmux 里手工起的 `ssh -N` 不会被接管，也不会被清理。
+7. **`autostart` 的时机是内核启动时**，不是 `create` 时。在界面里新建条目后需要点一下启动（或重启 App）。
 
 ## 重启与失败处理
 
@@ -106,6 +148,8 @@ spm create --name anvil-s3 \
   ├── state.json       运行态：state/pid/proc_start_time/proc_cmdline/restarts/last_error…
   ├── events.jsonl     事件流：start/stop/exit/restart/failed
   ├── logs/<name>.log  每个隧道一份，首行是完整的 ssh 命令行
+  ├── control.sock     控制通道，界面/CLI 与运行中的内核通信
+  ├── kernel.log        界面托管内核时的输出与退出原因
   └── lock             单实例锁
 ```
 
@@ -123,12 +167,16 @@ spm create --name anvil-s3 \
 spm list                       # 定义 + 状态 + 最近错误，先看这里
 spm logs <name> -f             # 跟随某个隧道的 ssh 输出
 tail -f ~/.ssh-proxy-manager/events.jsonl
+tail -f ~/.ssh-proxy-manager/kernel.log      # 内核自己的输出（界面托管时）
 ssh hhdev 'ss -ltn | grep 9223'   # 确认远端端口是否真的在监听 / 是否已释放
 ```
 
 常见现象：
 
+- 界面顶部显示「内核未运行」：点旁边的「启动内核」；如果仍失败，看 `~/.ssh-proxy-manager/kernel.log`（常见原因是锁被另一个 `spm run`/TUI 占着，或内核二进制不在）。
+- 「找不到 spm 可执行文件」：App 正常构建时内核打包在 `Contents/MacOS/spm`，若你单独运行 `spm ui` 打开的是别处的 App，用 `SPM_BIN` 指定内核路径。
 - `failed`：连续失败超过 5 次。多半是远端端口被占、host key 变更、或无法非交互认证；`spm logs` 能看到 ssh 的原始报错。
 - 启动即退避重启：`ExitOnForwardFailure=yes` 下远端端口被占用会立刻退出，日志里会有 `remote port forwarding failed for listen port ...`。
 - `create` 报端口冲突：`-R` 在同一个 target 上占用相同的远端 `bind_host:bind_port`，或 `-L`/`-D` 占用相同的本地端口，创建阶段就会拒绝。
+- 报「正向代理不支持 -R 转发」：同一条定义混了方向，拆成一条正向 + 一条反向。
 - 远端 `-R` 的 bind_host 默认写死 `127.0.0.1`；要听 `0.0.0.0` 需要显式配置，且远端 sshd 要开 `GatewayPorts`。

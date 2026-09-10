@@ -5,9 +5,13 @@
 管理形如 `ssh -N -R 127.0.0.1:9000:192.168.179.3:9000 lyy@hhdev -p 12880` 的隧道：可以新建、关闭、删除，
 并且用一条明确的规则把隧道生命周期绑到管理进程上。
 
-一句话定义：**一个 Go 单二进制，带 TUI 的前台管理器；TUI 进程就是 manager 本身。**
+一句话定义：**一个 Go 内核 + 一个原生 macOS 界面 App；界面进程托管内核，界面一退出就把所有隧道一起收走。**
 
-它不是守护进程，也不做"后台常驻 + 客户端 attach"那一套：打开它就开工作台，退出它就把所有隧道一起收走。
+形态分两层：`spm` 是内核（进程托管、生命周期、ssh 命令生成都在这里），`SSH Proxy Manager.app` 是可操作界面。
+App 启动时拉起 `spm run` 内核，并通过 unix socket 控制通道驱动它；界面进程以任何方式消失（正常退出、崩溃、
+`kill -9`）时内核 stdin 断裂，自动收走全部隧道。终端里的 TUI（`spm` 无参数）保留为备用界面，语义完全一致。
+
+它不是守护进程，也不做"后台常驻 + 客户端 attach"那一套：打开界面就开工作台，退出界面就把所有隧道一起收走。
 
 ## 二、不变量
 
@@ -22,13 +26,22 @@ INV-2 的直接后果需要提前接受：**误关终端窗口等于隧道全断
 ## 三、进程模型
 
 ```text
-┌──────────────────────────────────────────────┐
-│ spm (TUI 前台进程 = manager)                  │
-│  ├─ supervisor: 检测退出 → 退避 → 重启         │
-│  ├─ TUI (bubbletea): 列表/表单/日志/确认框     │
-│  ├─ 持有每个代理的 death-pipe 写端             │
-│  └─ 状态: config.json / state.json / events    │
-└───────────────┬──────────────────────────────┘
+┌────────────────────────────────────────────────────┐
+│ SSH Proxy Manager.app (SwiftUI)                    │
+│  ├─ 正向代理 / 反向代理 两个分区                     │
+│  ├─ 新建/编辑表单、启停/重启/删除、日志面板           │
+│  └─ 持有内核 stdin 的写端（界面死 → 内核读到 EOF）    │
+└───────────────┬────────────────────────────────────┘
+                │ ① unix socket 控制通道 control.sock（list/start/stop/…）
+                │ ② 内核 stdin 管道（唯一写端在 App 手里）
+                ▼
+┌────────────────────────────────────────────────────┐
+│ spm run（内核 = manager，也可由 TUI/终端单独启动）   │
+│  ├─ supervisor: 检测退出 → 退避 → 重启               │
+│  ├─ 控制通道服务端：list/start/stop/restart/add/…    │
+│  ├─ 持有每个代理的 death-pipe 写端                   │
+│  └─ 状态: config.json / state.json / events          │
+└───────────────┬────────────────────────────────────┘
                 │ os.Pipe() 写端留在这边（唯一持有者）
                 │ ExtraFiles 把读端作为 fd 3 传给 guard
                 ▼
@@ -40,6 +53,11 @@ INV-2 的直接后果需要提前接受：**误关终端窗口等于隧道全断
      ssh -N -R 127.0.0.1:9000:192.168.179.3:9000 lyy@hhdev -p 12880
      (-L/-D 同理；stdin=/dev/null，stdout/stderr → logs/<name>.log)
 ```
+
+两层各有一根"死亡管道"，都在父进程手里、都靠 EOF 触发：App 与内核之间一根（`spm run --watch-stdin`），
+内核与 guard 之间一根。因此界面崩溃和内核崩溃这两条路径都不会留孤儿。
+
+App 只通过控制通道操作，不直接碰 `state.json`，也不自己解析 ssh：界面与内核的职责边界就是那 8 个命令。
 
 ### guard 的职责
 
@@ -59,29 +77,47 @@ INV-2 的直接后果需要提前接受：**误关终端窗口等于隧道全断
 
 | manager 退出方式 | 覆盖机制 |
 | --- | --- |
+| 界面 App 退出（点退出菜单） | 显式 shutdown → 内核收走全部隧道 |
+| 界面 App 崩溃 / 被 `kill -9` | 内核 stdin 断裂（EOF）→ 同一条 shutdown 路径 |
+| 界面窗口关闭 | 不退出（`applicationShouldTerminateAfterLastWindowClosed = false`），隧道继续跑 |
 | TUI 里 `q` 退出 | 二次确认（列出将关闭的隧道数）→ 显式 shutdown |
 | Ctrl-C / SIGTERM / SIGHUP / SIGQUIT | `signal.Notify` 捕获 → 同一条 shutdown 路径 |
 | `kill -9` / panic / OOM | guard 的 death pipe EOF 兜底 |
 | 终端窗口关闭 | SIGHUP + death pipe 双保险 |
 | 机器重启 | 启动时 reconcile：按 `pid + 进程启动时间 + cmdline` 三元组校验，清理上一轮残留 |
 
+界面模式下真正的 manager 是 `spm run` 内核，所以"界面退出"与"内核退出"要分开看：App 退出时关掉内核 stdin
+（内核自己收摊），App 被强杀时内核读到 EOF 收摊；两者都不依赖 App 能否跑到清理代码。
+
 shutdown 固定顺序：置 epoch（让所有在途 restart 立刻失效）→ 逐代理 `SIGTERM` → 宽限 5s → `SIGKILL`
 → 写 state → 释放锁 → 退出。
 
-## 五、命令行与 TUI 的分工
+## 五、界面、内核与 CLI 的分工
 
 生命周期绑定决定了一件事：**凡是启动隧道的进程，必须一直活着**。因此短命的 CLI 子命令不能启动隧道
-（它一退出 guard 就会收掉 ssh），CLI 只做定义与只读查询：
+（它一退出 guard 就会收掉 ssh）。界面 App 常驻，所以它能启动隧道；终端 CLI 要么托管内核，要么只写定义、
+要么通过控制通道请求常驻内核代劳：
 
 | 入口 | 职责 |
 | --- | --- |
-| `spm` | 进 TUI，即 manager：建/启/停/重启/删除隧道，看日志 |
-| `spm run` | 无界面 supervisor，同一套核心，便于脚本化与排障 |
+| `SSH Proxy Manager.app` | 图形界面：正向/反向两个分区，建/启/停/重启/删除、看日志 |
+| `spm ui` | 打开界面 App（依次找 `SPM_APP`、`/Applications`、构建目录） |
+| `spm run [--watch-stdin]` | 内核本体；`--watch-stdin` 供界面托管，stdin 断裂即收摊 |
+| `spm` | 进 TUI（备用界面），同一套内核逻辑 |
+| `spm start\|stop\|restart <name>` | 通过控制通道请求运行中的内核代劳 |
 | `spm create` | 只写定义，不启动 |
 | `spm list [--json]` | 定义 + 运行态只读展示 |
 | `spm delete <name>` | 删除定义（运行中的条目由 manager 侧收敛） |
 | `spm logs <name> [-f]` | 读日志文件 |
 | `spm __guard` | 隐藏模式，由 supervisor 内部调用 |
+
+控制通道是 `~/.ssh-proxy-manager/control.sock`（0600，仅本机、仅当前用户），一次连接一个 JSON 请求/响应：
+
+```text
+ping | list | logs | start | stop | restart | delete | add | update | shutdown
+```
+
+界面不做本地状态推断：列表、运行态、日志全部来自控制通道，避免"界面以为的"和"内核实际在跑的"分叉。
 
 ## 六、数据与目录
 
@@ -91,6 +127,8 @@ shutdown 固定顺序：置 epoch（让所有在途 restart 立刻失效）→ �
   ├── state.json       运行态（manager 独占写，临时文件 + rename 原子替换）
   ├── events.jsonl     事件流（start/stop/exit/restart/failed）
   ├── logs/<name>.log  每代理一份
+  ├── control.sock     控制通道（仅界面/CLI 与运行中的内核通信，0600）
+  ├── kernel.log       界面托管内核时的 stdout/stderr（事件流与退出原因）
   └── lock             单实例锁（flock）
 ```
 
@@ -99,6 +137,7 @@ shutdown 固定顺序：置 epoch（让所有在途 restart 立刻失效）→ �
 ```json
 {
   "name": "anvil-s3-9000",
+  "direction": "reverse",
   "target": { "user": "lyy", "host": "hhdev", "port": 12880, "identity": "~/.ssh/id_rsa" },
   "forwards": [
     { "type": "R", "bind_host": "127.0.0.1", "bind_port": 9000,
@@ -110,11 +149,12 @@ shutdown 固定顺序：置 epoch（让所有在途 restart 立刻失效）→ �
 }
 ```
 
-运行态字段：`state / pid / guard_pid / proc_start_time / started_at / restarts / last_exit_code / last_exit_at / last_error`。
-`proc_start_time` 不能省：只凭 pid 判活会被 PID 复用骗到，可能误杀无关进程。
+运行态字段：`state / pid / guard_pid / proc_start_time / proc_cmdline / guard_start_time / guard_cmdline /
+started_at / restarts / last_exit_code / last_exit_at / last_error`。
+`proc_start_time` 与 `proc_cmdline` 不能省：只凭 pid 判活会被 PID 复用骗到，可能误杀无关进程。
 
 状态机：`stopped → starting → running → stopping → stopped`，异常分支 `restarting(backoff)` 与 `failed`。
-只有 supervisor 改运行态，TUI 只发命令。
+只有 supervisor 改运行态，界面（App / TUI）只发命令。
 
 ## 七、ssh 命令生成
 
@@ -125,7 +165,19 @@ shutdown 固定顺序：置 epoch（让所有在途 restart 立刻失效）→ �
 - 需要 passphrase 走 ssh-agent，manager 不接触凭据；
 - 支持 `-R` / `-L` / `-D`，单条目可挂多条转发。
 
-## 八、TUI 交互
+### 正向代理与反向代理
+
+| 方向 | 语义 | 转发类型 | 字段含义 |
+| --- | --- | --- | --- |
+| 反向代理 | 远端端口 → 本机服务 | `-R` | `bind` 是远端监听地址/端口，`dest` 是本机目标 |
+| 正向代理 | 本机端口 → 远端服务 | `-L` | `bind` 是本机监听地址/端口，`dest` 是远端目标 |
+| 正向代理 | 本机 SOCKS | `-D` | 只有本机监听地址/端口，无 `dest` |
+
+方向落在 `direction` 字段（`forward` / `reverse`），`Validate` 拒绝同一条定义混用 `-R` 与 `-L/-D`：
+两者的 `bind` 在完全不同的命名空间里，混在一条定义里界面上没法表达，也容易误判端口冲突。
+老配置没有该字段时按转发类型推断（出现 `-R` 即反向），不需要手工迁移。
+
+## 八、TUI 交互（备用界面，日常用 App）
 
 主界面：上方为隧道列表（name、target、转发、state、pid、uptime、restarts、last error），
 下方为选中条目的日志尾部，底部为状态栏与快捷键提示。
@@ -152,17 +204,21 @@ shutdown 固定顺序：置 epoch（让所有在途 restart 立刻失效）→ �
 
 ```text
 ssh-proxy-manager/
-  ├── cmd/spm/main.go            # 入口：无参进 TUI，有子命令走 CLI
+  ├── cmd/spm/main.go            # 入口：无参进 TUI，ui/run/start/stop/… 走 CLI
+  ├── Sources/*.swift            # 界面 App（SwiftUI）：列表/表单/日志/内核托管
+  ├── build.sh / Makefile        # 产出 build/SSH Proxy Manager.app（内含 spm 内核）
   ├── internal/config/           # 定义读写、校验、原子落盘
   ├── internal/store/            # state/events、单实例锁
   ├── internal/supervisor/       # spawn、wait、退避、epoch、reconcile
+  ├── internal/control/          # 控制通道：unix socket 服务端与客户端
   ├── internal/guard/            # __guard 模式：death pipe → 杀进程组
   ├── internal/sshcmd/           # 命令与参数生成（-R/-L/-D）
   ├── internal/tui/              # bubbletea 模型/视图/表单
   └── internal/logging/          # 每代理日志
 ```
 
-TUI 用 bubbletea + lipgloss；进程与系统调用只用标准库（`os/exec`、`syscall`、`os/signal`）。
+App 用 SwiftUI，`build.sh` 手工组装 `.app` 并把 Go 内核打进 `Contents/MacOS/spm`；
+内核与 TUI 用 bubbletea + lipgloss 之外只用标准库（`os/exec`、`syscall`、`os/signal`、`net`）。
 
 ## 十、重启策略
 
@@ -181,6 +237,9 @@ TUI 用 bubbletea + lipgloss；进程与系统调用只用标准库（`os/exec`�
 5. 启动时若发现上轮残留 → 按三元组校验后清理，且不会误杀同名的无关进程。
 6. 同名 `create` 报错且不产生第二个进程；`stop` 之后不被自动拉起。
 7. guard 的 EOF 行为必须有回归测试：起真实代理，`kill -9` 父进程，断言 ssh 进程组秒级消失。
+8. 界面托管：`kill -9` 界面 App → 内核读到 EOF、退出码 0、全部隧道消失、`control.sock` 被清理。
+9. 界面语义：关窗口不退出、隧道继续跑；点"退出"才收走隧道；内核已在运行时 App 直接附加，退出 App 不影响它。
+10. 控制通道：`ping/list/start/stop/restart/add/update/delete/logs` 全覆盖，内核未运行时客户端要立即报错而不是挂住。
 
 ## 十二、已知坑
 

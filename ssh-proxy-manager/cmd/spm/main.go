@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
@@ -13,6 +15,7 @@ import (
 	"time"
 
 	"github.com/historyliao/usefull-tools/ssh-proxy-manager/internal/config"
+	"github.com/historyliao/usefull-tools/ssh-proxy-manager/internal/control"
 	"github.com/historyliao/usefull-tools/ssh-proxy-manager/internal/guard"
 	"github.com/historyliao/usefull-tools/ssh-proxy-manager/internal/logging"
 	"github.com/historyliao/usefull-tools/ssh-proxy-manager/internal/store"
@@ -72,7 +75,11 @@ func main() {
 	case "tui":
 		os.Exit(runTUI(flagDir(os.Args[2:])))
 	case "run":
-		os.Exit(runHeadless(flagDir(os.Args[2:])))
+		os.Exit(cmdRun(os.Args[2:]))
+	case "ui":
+		os.Exit(cmdUI())
+	case "start", "stop", "restart":
+		os.Exit(cmdControl(os.Args[1], os.Args[2:]))
 	case "create", "add":
 		os.Exit(cmdCreate(os.Args[2:]))
 	case "list", "ls":
@@ -95,22 +102,28 @@ func main() {
 }
 
 func usage() {
-	fmt.Print(`spm - ssh 隧道管理器（TUI 即 manager，退出即收走所有隧道）
+	fmt.Print(`spm - ssh 隧道管理器（manager 进程就是界面本体，退出即收走所有隧道）
 
 用法:
-  spm                              打开 TUI（manager 本体）
-  spm run                          无界面 supervisor，便于脚本化与排障
+  spm                              打开 TUI（终端界面）
+  spm run                          无界面 supervisor，界面 App 与脚本都靠它托管隧道
+  spm ui                           打开 SSH Proxy Manager 界面 App
   spm create --name N --ssh U@H[:P] -R bind:port:dest:port ...
   spm list [--json]                查看定义与运行态
   spm delete <name>                删除定义
+  spm start|stop|restart <name>    通过控制通道操作运行中的 manager
   spm logs <name> [-f]             查看隧道日志
 
 通用参数:
   --dir <path>                     状态目录，默认 ~/.ssh-proxy-manager
 
+run 专属参数:
+  --watch-stdin                    stdin 关闭（界面进程退出）时一并退出并收走隧道
+
 环境变量:
   SPM_DIR            状态目录
   SPM_SSH_BIN        替换 ssh 可执行文件（测试用）
+  SPM_APP            界面 App 路径（spm ui 使用）
 `)
 }
 
@@ -254,6 +267,7 @@ func cmdList(args []string) int {
 	if *asJSON {
 		type item struct {
 			Name       string            `json:"name"`
+			Direction  string            `json:"direction"`
 			Target     string            `json:"target"`
 			Forwards   []string          `json:"forwards"`
 			State      string            `json:"state"`
@@ -270,6 +284,7 @@ func cmdList(args []string) int {
 			}
 			items = append(items, item{
 				Name:       row.Definition.Name,
+				Direction:  row.Definition.Direction,
 				Target:     row.Definition.Target.Address(),
 				Forwards:   forwards,
 				State:      row.Runtime.State,
@@ -290,10 +305,11 @@ func cmdList(args []string) int {
 		fmt.Println("暂无隧道定义，运行 spm 进入 TUI 新建。")
 		return 0
 	}
-	fmt.Printf("%-20s %-26s %-38s %-11s %-7s %-5s %s\n", "NAME", "TARGET", "FORWARDS", "STATE", "PID", "RST", "LAST ERROR")
+	fmt.Printf("%-20s %-6s %-26s %-38s %-11s %-7s %-5s %s\n", "NAME", "方向", "TARGET", "FORWARDS", "STATE", "PID", "RST", "LAST ERROR")
 	for _, row := range rows {
-		fmt.Printf("%-20s %-26s %-38s %-11s %-7d %-5d %s\n",
+		fmt.Printf("%-20s %-6s %-26s %-38s %-11s %-7d %-5d %s\n",
 			row.Definition.Name,
+			row.Definition.DirectionLabel(),
 			row.Definition.Target.Address(),
 			truncate(row.Definition.ForwardsDisplay(), 38),
 			row.Runtime.State,
@@ -357,7 +373,17 @@ func cmdLogs(args []string) int {
 	return 0
 }
 
-func runHeadless(dir string) int {
+func cmdRun(args []string) int {
+	fs := flag.NewFlagSet("run", flag.ExitOnError)
+	dir := fs.String("dir", "", "状态目录")
+	watchStdin := fs.Bool("watch-stdin", false, "stdin 关闭时一并退出并收走所有隧道")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	return runHeadless(*dir, *watchStdin)
+}
+
+func runHeadless(dir string, watchStdin bool) int {
 	p := resolvePaths(dir)
 	lock, err := store.AcquireLock(p.lock)
 	if err != nil {
@@ -379,9 +405,23 @@ func runHeadless(dir string) int {
 		fmt.Fprintf(os.Stderr, "启动失败: %v\n", err)
 	}
 
+	srv, err := control.Serve(p.dir, mgr, version)
+	if err != nil {
+		return exitWithError(err)
+	}
+	defer srv.Close()
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
 	defer stop()
+	if watchStdin {
+		go func() {
+			_, _ = io.Copy(io.Discard, os.Stdin)
+			fmt.Println("stdin 已关闭（父进程退出），开始收走所有隧道")
+			stop()
+		}()
+	}
 	fmt.Println("supervisor 已启动，Ctrl-C 退出（退出会关闭所有隧道）")
+	fmt.Printf("控制通道: %s\n", srv.Path())
 	go func() {
 		ticker := time.NewTicker(5 * time.Second)
 		defer ticker.Stop()
@@ -429,6 +469,11 @@ func runTUI(dir string) int {
 	for _, err := range mgr.StartAutostart() {
 		fmt.Fprintf(os.Stderr, "自动启动失败: %v\n", err)
 	}
+	srv, err := control.Serve(p.dir, mgr, version)
+	if err != nil {
+		return exitWithError(err)
+	}
+	defer srv.Close()
 	defer mgr.Shutdown()
 	return tui.Run(tui.Options{
 		Manager:  mgr,
@@ -436,6 +481,60 @@ func runTUI(dir string) int {
 		StateDir: p.dir,
 		Version:  version,
 	})
+}
+
+func cmdControl(action string, args []string) int {
+	fs := flag.NewFlagSet(action, flag.ExitOnError)
+	dir := fs.String("dir", "", "状态目录")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	rest := fs.Args()
+	if len(rest) != 1 {
+		fmt.Fprintf(os.Stderr, "用法: spm %s <name>\n", action)
+		return 2
+	}
+	p := resolvePaths(*dir)
+	resp, err := control.Call(control.SocketPath(p.dir), control.Request{Cmd: action, Name: rest[0]})
+	if err != nil {
+		return exitWithError(err)
+	}
+	fmt.Println(resp.Message)
+	return 0
+}
+
+func cmdUI() int {
+	path := appPath()
+	if path == "" {
+		fmt.Fprintln(os.Stderr, "错误: 找不到 SSH Proxy Manager.app，先执行 ssh-proxy-manager/build.sh 构建，或用 SPM_APP 指定路径")
+		return 1
+	}
+	if err := exec.Command("open", path).Run(); err != nil {
+		return exitWithError(err)
+	}
+	fmt.Printf("已打开 %s\n", path)
+	return 0
+}
+
+func appPath() string {
+	if path := os.Getenv("SPM_APP"); path != "" {
+		return path
+	}
+	candidates := []string{"/Applications/SSH Proxy Manager.app"}
+	if exe, err := os.Executable(); err == nil {
+		dir := filepath.Dir(exe)
+		candidates = append(candidates,
+			filepath.Join(dir, "build", "SSH Proxy Manager.app"),
+			filepath.Join(dir, "..", "build", "SSH Proxy Manager.app"),
+			filepath.Join(dir, "..", "..", "build", "SSH Proxy Manager.app"),
+		)
+	}
+	for _, candidate := range candidates {
+		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
+			return candidate
+		}
+	}
+	return ""
 }
 
 func truncate(s string, limit int) string {

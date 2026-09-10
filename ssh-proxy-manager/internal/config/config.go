@@ -16,6 +16,8 @@ const (
 	RestartAlways   = "always"
 	RestartOnFail   = "on-failure"
 	RestartNever    = "never"
+	DirectionFwd    = "forward"
+	DirectionRev    = "reverse"
 	DefaultForward  = "R"
 	DefaultBindHost = "127.0.0.1"
 	DefaultSSHPort  = 22
@@ -50,6 +52,7 @@ type Backoff struct {
 
 type Definition struct {
 	Name      string    `json:"name"`
+	Direction string    `json:"direction,omitempty"`
 	Target    Target    `json:"target"`
 	Forwards  []Forward `json:"forwards"`
 	Restart   string    `json:"restart"`
@@ -148,7 +151,28 @@ func Normalize(def Definition) Definition {
 	for i := range def.Forwards {
 		def.Forwards[i] = NormalizeForward(def.Forwards[i])
 	}
+	if def.Direction == "" {
+		def.Direction = DeriveDirection(def.Forwards)
+	}
+	def.Direction = strings.ToLower(strings.TrimSpace(def.Direction))
 	return def
+}
+
+// DeriveDirection 按转发类型推断方向：出现 -R 即反向代理，其余（-L/-D）为正向代理。
+func DeriveDirection(forwards []Forward) string {
+	for _, f := range forwards {
+		if f.Type == "R" {
+			return DirectionRev
+		}
+	}
+	return DirectionFwd
+}
+
+func (d Definition) DirectionLabel() string {
+	if d.Direction == DirectionRev {
+		return "反向"
+	}
+	return "正向"
 }
 
 func NormalizeForward(f Forward) Forward {
@@ -183,7 +207,18 @@ func Validate(def Definition) error {
 	default:
 		return fmt.Errorf("%s: 重启策略 %q 非法，取值为 %s/%s/%s", def.Name, def.Restart, RestartAlways, RestartOnFail, RestartNever)
 	}
+	switch def.Direction {
+	case DirectionFwd, DirectionRev:
+	default:
+		return fmt.Errorf("%s: 方向 %q 非法，取值为 %s/%s", def.Name, def.Direction, DirectionFwd, DirectionRev)
+	}
 	for i, f := range def.Forwards {
+		if def.Direction == DirectionRev && f.Type != "R" {
+			return fmt.Errorf("%s: 反向代理只支持 -R 转发，第 %d 条是 -%s", def.Name, i+1, f.Type)
+		}
+		if def.Direction == DirectionFwd && f.Type == "R" {
+			return fmt.Errorf("%s: 正向代理不支持 -R 转发，第 %d 条请拆成独立的反向代理", def.Name, i+1)
+		}
 		if err := validateForward(def.Name, i, f); err != nil {
 			return err
 		}

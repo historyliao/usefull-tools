@@ -134,19 +134,7 @@ ssh 的三个转发选项里，`-D`（SOCKS 动态转发）**只有本地版本*
 
 所以反向代理只能一条条配固定目标（可以配多条 `-R`），不存在 `-R` 版的 SOCKS。
 
-确实需要"远端程序用 SOCKS、出口在你这台 Mac"时，用两条定义组合出来——把本机的 SOCKS 端口反向暴露给远端：
-
-```bash
-# ① 正向：在本机开一个 SOCKS 端口（这个例子里它的出口是 hhdev）
-spm create --name mac-socks --ssh hhdev -D 127.0.0.1:18080
-
-# ② 反向：把本机这个 SOCKS 端口暴露到远端 18081
-spm create --name expose-socks --ssh hhdev -R 127.0.0.1:18081:127.0.0.1:18080
-```
-
-之后远端任何支持 SOCKS 的程序（浏览器、`curl --socks5-hostname`、绝大多数 CLI）把 `127.0.0.1:18081` 当 SOCKS 用即可。
-实测：在远端起 `curl -s --socks5-hostname 127.0.0.1:18081 https://example.com` 能拿到页面——这条 SOCKS 实际跑在你 Mac 上，
-每个连接的出口由那条 `-D` 定义决定（上面例子里是 hhdev；换成指向别处的 SOCKS 服务，出口就在那一边）。
+需要"远端程序用 SOCKS"时，用两条定义组合出来即可，见下一节 [把本机的 SOCKS 借给远端](#组合用法把本机的-socks-借给远端)。
 
 ### 正向代理：`-L` 与 `-D` 的区别
 
@@ -162,6 +150,73 @@ spm create --name expose-socks --ssh hhdev -R 127.0.0.1:18081:127.0.0.1:18080
 | 监听地址写 `0.0.0.0` | 同网段其他机器能用你本机这个端口 | 等于把代理开放给同网段，谨慎 |
 
 一句话：**`-L` 是"这个本地端口永远通向那一个远端目标"，`-D` 是"这个本地端口是个代理，通向哪儿由连上来的程序说"**。
+
+## 组合用法：把本机的 SOCKS 借给远端
+
+场景：远端机器上的程序（浏览器、CLI、构建脚本）需要一个 SOCKS 代理，而你想让它的流量走你这边能到的网络。
+ssh 本身没有"远端 SOCKS"，但用两条定义就能组合出来：**一条正向 `-D` 在本机开 SOCKS 端口，一条反向 `-R` 把这个端口暴露到远端**。
+
+### 1. 建两条定义
+
+```bash
+# ① 正向：在本机开一个 SOCKS 端口（这个例子里它经 hhdev 出网）
+spm create --name mac-socks --ssh hhdev -D 127.0.0.1:18080
+
+# ② 反向：把本机的 18080 暴露到远端的 18081
+spm create --name expose-socks --ssh hhdev -R 127.0.0.1:18081:127.0.0.1:18080
+```
+
+界面里就是两条定义：`mac-socks` 选**正向**、类型 D、本机端口 18080；`expose-socks` 选**反向**、远端 18081 → 本机目标 18080。
+
+### 2. 启动
+
+```bash
+spm ui                       # 界面里两条各点一次「启动」
+```
+
+或者走命令行：
+
+```bash
+spm run                      # 内核（autostart 的会自动起来）
+spm start mac-socks
+spm start expose-socks
+```
+
+### 3. 远端使用
+
+远端任何支持 SOCKS 的程序，把 `127.0.0.1:18081` 当 SOCKS 代理即可：
+
+```bash
+curl --socks5-hostname 127.0.0.1:18081 https://example.com
+```
+
+浏览器里就是"手动配置代理 → SOCKS 主机 127.0.0.1、端口 18081"（记得勾选用 SOCKS 做 DNS）。
+
+### 4. 自查
+
+```bash
+ssh hhdev 'ss -ltn | grep 18081'        # 远端确实在监听
+ssh hhdev 'curl -s --socks5-hostname 127.0.0.1:18081 -o /dev/null -w "%{http_code}\n" https://example.com'
+```
+
+### 5. 清理
+
+```bash
+spm delete mac-socks
+spm delete expose-socks
+```
+
+删掉定义后远端的 18081 会随之释放。界面里点「删除」效果相同（会先停隧道再删定义，日志保留）。
+
+### 关于"出口"与安全，两点必须说清
+
+- **出口由那条 `-D` 定义决定，不是由"在远端用"决定。** SOCKS 服务跑在你这台 Mac 上，但它每个连接是顺着 `-D` 的隧道出去的：上面例子里 `-D` 连的是 hhdev，所以最终出网 IP 是 hhdev 的，而不是你家的宽带。想让出口就是**本机自己的网络**，别用 `-D`（它必然经隧道），改成先在本机跑一个直接出网的 SOCKS5 服务，再用 `-R` 把它的端口暴露给远端。
+- **默认只绑远端 `127.0.0.1`，只有远端那台机器能用。** 一旦把远端监听地址改成 `0.0.0.0`（并且远端 sshd 允许 `GatewayPorts`），等于把这个 SOCKS 开放给远端机器所在的整个网络，务必确认这是你要的。
+
+### 实测记录
+
+按上面的步骤在本机验证过：远端 `ss -ltn` 能看到 `127.0.0.1:18081` 监听；在 hhdev 上执行
+`curl --socks5-hostname 127.0.0.1:18081 https://example.com` 返回真实页面；`spm delete` 两条定义后远端 18081 立即释放。
 
 ## 命令
 
@@ -199,7 +254,7 @@ spm create --name anvil-s3 \
 - `--autostart` 默认 `true`：manager 启动时自动拉起该条目。
 - `--extra-arg` 透传额外 ssh 参数，一次一个参数，可重复。
 
-## TUI 快捷键
+## 终端界面快捷键（备用界面）
 
 | 按键 | 动作 |
 | --- | --- |

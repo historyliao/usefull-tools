@@ -176,7 +176,7 @@ started_at / restarts / last_exit_code / last_exit_at / last_error`。
 `-L` 与 `-D` 都属于正向：前者在本地开一个固定指向某个远端目标的端口，后者在本地开一个 SOCKS4/5 代理，
 目标由客户端运行时给出，两者到目标的连接都由远端 sshd 发起。ssh 没有"远端 SOCKS"，所以反向只支持 `-R`；
 要在远端使用 SOCKS，就在本机开一个 SOCKS 端口（`-D`），再用一条反向定义把它暴露给远端，这是两条定义的组合，
-不是新增转发类型。
+不是新增转发类型（完整步骤见 README 的「组合用法：把本机的 SOCKS 借给远端」）。
 
 方向落在 `direction` 字段（`forward` / `reverse`），`Validate` 拒绝同一条定义混用 `-R` 与 `-L/-D`：
 两者的 `bind` 在完全不同的命名空间里，混在一条定义里界面上没法表达，也容易误判端口冲突。

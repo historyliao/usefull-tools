@@ -14,7 +14,8 @@ struct MountManagerApp: App {
     }
 
     var body: some Scene {
-        WindowGroup(id: "main") {
+        // Window 是单实例场景：菜单栏里重复点「打开主窗口」只会置前，不会开出第二个
+        Window("SSH 挂载管理器", id: "main") {
             ContentView()
                 .environmentObject(store)
                 .environmentObject(controller)

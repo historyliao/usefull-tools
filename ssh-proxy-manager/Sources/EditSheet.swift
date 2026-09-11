@@ -1,10 +1,13 @@
 import SwiftUI
 
 struct EditSheet: View {
+    @EnvironmentObject private var state: AppState
+
     @State private var draft: ProxyDefinition
     @State private var sshSpec: String
     @State private var extraArgs: String
     @State private var errorText: String?
+    @State private var targetRef: String
 
     let isNew: Bool
     let onSave: (ProxyDefinition) -> Void
@@ -16,6 +19,7 @@ struct EditSheet: View {
         _draft = State(initialValue: definition)
         _sshSpec = State(initialValue: definition.target.address)
         _extraArgs = State(initialValue: definition.target.extraArgs.joined(separator: " "))
+        _targetRef = State(initialValue: definition.targetRef)
         self.isNew = isNew
         self.onSave = onSave
         self.onCancel = onCancel
@@ -61,10 +65,33 @@ struct EditSheet: View {
                                 .opacity(isNew ? 1 : 0.6)
                         }
                         labeled("SSH 目标") {
-                            TextField("hhdev 或 lyy@host:12880", text: $sshSpec)
+                            Picker("", selection: $targetRef) {
+                                Text("自定义").tag("")
+                                ForEach(state.targets) { target in
+                                    Text("\(target.name) · \(target.address)").tag(target.name)
+                                }
+                            }
+                            .labelsHidden()
+                            .frame(maxWidth: 320, alignment: .leading)
                         }
-                        labeled("私钥") {
-                            TextField("可留空，例如 ~/.ssh/id_rsa", text: $draft.target.identity)
+                        if targetRef.isEmpty {
+                            labeled("") {
+                                TextField("hhdev 或 lyy@host:12880", text: $sshSpec)
+                            }
+                            labeled("私钥") {
+                                TextField("可留空，例如 ~/.ssh/id_rsa", text: $draft.target.identity)
+                            }
+                        } else {
+                            labeled("解析为") {
+                                Text(selectedTargetAddress)
+                                    .font(.system(size: 12, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                            }
+                            labeled("私钥") {
+                                Text(selectedTargetIdentity)
+                                    .font(.system(size: 12, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                            }
                         }
                     }
 
@@ -140,24 +167,42 @@ struct EditSheet: View {
     }
 
     private func commit() {
-        guard let target = Target.parse(sshSpec) else {
-            errorText = "SSH 目标格式不对，应为 hhdev 或 user@host:port"
-            return
-        }
         var definition = draft
         definition.name = draft.name.trimmingCharacters(in: .whitespacesAndNewlines)
-        definition.target = Target(
-            user: target.user,
-            host: target.host,
-            port: target.port,
-            identity: draft.target.identity.trimmingCharacters(in: .whitespacesAndNewlines),
-            extraArgs: extraArgs.split(separator: " ").map(String.init).filter { !$0.isEmpty }
-        )
+        let ref = targetRef.trimmingCharacters(in: .whitespaces)
+        if ref.isEmpty {
+            guard let target = Target.parse(sshSpec) else {
+                errorText = "SSH 目标格式不对，应为 hhdev 或 user@host:port"
+                return
+            }
+            definition.targetRef = ""
+            definition.target = Target(
+                user: target.user,
+                host: target.host,
+                port: target.port,
+                identity: draft.target.identity.trimmingCharacters(in: .whitespacesAndNewlines),
+                extraArgs: extraArgs.split(separator: " ").map(String.init).filter { !$0.isEmpty }
+            )
+        } else {
+            definition.targetRef = ref
+            if let target = state.target(named: ref) {
+                definition.target = target.asTarget
+            }
+        }
         if let error = definition.validate() {
             errorText = error
             return
         }
         onSave(definition)
+    }
+
+    private var selectedTargetAddress: String {
+        state.target(named: targetRef)?.address ?? "目标 \(targetRef) 不存在"
+    }
+
+    private var selectedTargetIdentity: String {
+        let identity = state.target(named: targetRef)?.identity ?? ""
+        return identity.isEmpty ? "（未设置）" : identity
     }
 
     private func normalizeForwards(for direction: ProxyDirection) {

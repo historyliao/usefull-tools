@@ -34,6 +34,10 @@ struct ContentView: View {
                 )
             }
         }
+        .sheet(isPresented: $state.managingTargets) {
+            TargetsSheet()
+                .environmentObject(state)
+        }
         .alert("删除代理", isPresented: $confirmingDelete, presenting: pendingDelete) { item in
             Button("删除", role: .destructive) {
                 state.remove(item.definition.name)
@@ -76,6 +80,12 @@ struct ContentView: View {
                 .disabled(!state.kernelReady || state.items.isEmpty)
             Button("全部停止") { state.stopAll() }
                 .disabled(!state.kernelReady || state.runningCount == 0)
+            Button {
+                state.managingTargets = true
+            } label: {
+                Label("SSH 目标", systemImage: "server.rack")
+            }
+            .disabled(!state.kernelReady)
             Button {
                 state.openEditor(for: nil)
             } label: {
@@ -173,7 +183,7 @@ struct ProxyRow: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(item.definition.name)
                     .font(.system(size: 13, weight: .semibold))
-                Text("\(item.definition.target.address) · \(item.definition.forwardSummary)")
+                Text("\(state.displayTarget(item.definition)) · \(item.definition.forwardSummary)")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -210,6 +220,8 @@ struct ProxyRow: View {
 }
 
 struct ProxyDetail: View {
+    @EnvironmentObject private var state: AppState
+
     let item: ProxyItem
     let logs: [String]
     let busy: Bool
@@ -241,9 +253,10 @@ struct ProxyDetail: View {
                     .foregroundStyle(.secondary)
 
                 Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 5) {
-                    row("SSH 目标", item.definition.target.address)
-                    if !item.definition.target.identity.isEmpty {
-                        row("私钥", item.definition.target.identity)
+                    row("SSH 目标", state.displayTarget(item.definition))
+                    let identity = state.displayIdentity(item.definition)
+                    if !identity.isEmpty {
+                        row("私钥", identity)
                     }
                     row("转发", item.definition.forwards.map(\.display).joined(separator: "\n"))
                     row("重启策略", item.definition.restartSummary)

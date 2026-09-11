@@ -30,6 +30,7 @@ type Request struct {
 	Name       string             `json:"name,omitempty"`
 	Lines      int                `json:"lines,omitempty"`
 	Definition *config.Definition `json:"definition,omitempty"`
+	Target     *config.SSHTarget  `json:"target,omitempty"`
 }
 
 type Row struct {
@@ -38,13 +39,14 @@ type Row struct {
 }
 
 type Response struct {
-	OK         bool     `json:"ok"`
-	Error      string   `json:"error,omitempty"`
-	Message    string   `json:"message,omitempty"`
-	Version    string   `json:"version,omitempty"`
-	ManagerPID int      `json:"manager_pid,omitempty"`
-	Rows       []Row    `json:"rows,omitempty"`
-	Logs       []string `json:"logs,omitempty"`
+	OK         bool               `json:"ok"`
+	Error      string             `json:"error,omitempty"`
+	Message    string             `json:"message,omitempty"`
+	Version    string             `json:"version,omitempty"`
+	ManagerPID int                `json:"manager_pid,omitempty"`
+	Rows       []Row              `json:"rows,omitempty"`
+	Targets    []config.SSHTarget `json:"targets,omitempty"`
+	Logs       []string           `json:"logs,omitempty"`
 }
 
 type Server struct {
@@ -166,6 +168,30 @@ func (s *Server) handle(req Request) Response {
 			return Response{Error: err.Error()}
 		}
 		return Response{OK: true, Message: fmt.Sprintf("%s 已保存", req.Definition.Name)}
+	case "targets":
+		return Response{OK: true, Targets: s.mgr.Targets()}
+	case "target-add", "target-update":
+		if req.Target == nil {
+			return Response{Error: "缺少 target"}
+		}
+		var err error
+		if req.Cmd == "target-add" {
+			err = s.mgr.AddTarget(*req.Target)
+		} else {
+			err = s.mgr.UpdateTarget(*req.Target)
+		}
+		if err != nil {
+			return Response{Error: err.Error()}
+		}
+		return Response{OK: true, Message: fmt.Sprintf("SSH 目标 %s 已保存", req.Target.Name)}
+	case "target-delete":
+		if req.Name == "" {
+			return Response{Error: "缺少 name"}
+		}
+		if err := s.mgr.DeleteTarget(req.Name); err != nil {
+			return Response{Error: err.Error()}
+		}
+		return Response{OK: true, Message: fmt.Sprintf("SSH 目标 %s 已删除", req.Name)}
 	case "shutdown":
 		go s.mgr.Shutdown()
 		return Response{OK: true, Message: "manager 正在退出"}

@@ -4,6 +4,7 @@ final class AppState: ObservableObject {
     static let shared = AppState()
 
     @Published private(set) var items: [ProxyItem] = []
+    @Published private(set) var targets: [SSHTarget] = []
     @Published var selection: String?
     @Published private(set) var logs: [String] = []
     @Published private(set) var kernelReady = false
@@ -14,6 +15,7 @@ final class AppState: ObservableObject {
     @Published private(set) var statusIsError = false
     @Published var editing: ProxyDefinition?
     @Published var isCreating = false
+    @Published var managingTargets = false
 
     private let kernel = Kernel.shared
     private let work = DispatchQueue(label: "spm.appstate", qos: .userInitiated)
@@ -23,6 +25,60 @@ final class AppState: ObservableObject {
     var reverseItems: [ProxyItem] { items.filter { $0.definition.direction == .reverse } }
     var forwardItems: [ProxyItem] { items.filter { $0.definition.direction == .forward } }
     var runningCount: Int { items.filter { $0.runtime.isActive }.count }
+
+    func target(named name: String) -> SSHTarget? {
+        targets.first { $0.name == name }
+    }
+
+    /// 列表/详情里展示的 SSH 目标：引用了命名目标时显示解析结果，并标注来源。
+    func displayTarget(_ definition: ProxyDefinition) -> String {
+        let ref = definition.targetRef.trimmingCharacters(in: .whitespaces)
+        guard !ref.isEmpty else { return definition.target.address }
+        guard let target = target(named: ref) else { return "复用 \(ref)（目标不存在）" }
+        return "\(target.address) · 复用 \(target.name)"
+    }
+
+    func displayIdentity(_ definition: ProxyDefinition) -> String {
+        let ref = definition.targetRef.trimmingCharacters(in: .whitespaces)
+        if !ref.isEmpty, let target = target(named: ref) { return target.identity }
+        return definition.target.identity
+    }
+
+    func refreshTargets() {
+        work.async {
+            guard let response = try? self.kernel.client.call(.targets()) else { return }
+            let targets = (response.targets ?? []).sorted { $0.name < $1.name }
+            DispatchQueue.main.async { self.targets = targets }
+        }
+    }
+
+    func saveTarget(_ target: SSHTarget, isNew: Bool) {
+        work.async {
+            do {
+                let response = try self.kernel.client.call(.saveTarget(target, isNew: isNew))
+                DispatchQueue.main.async {
+                    self.setStatus(response.message ?? "SSH 目标已保存", isError: false)
+                    self.refreshTargets()
+                }
+            } catch {
+                DispatchQueue.main.async { self.setStatus(error.localizedDescription, isError: true) }
+            }
+        }
+    }
+
+    func deleteTarget(_ name: String) {
+        work.async {
+            do {
+                let response = try self.kernel.client.call(.deleteTarget(name: name))
+                DispatchQueue.main.async {
+                    self.setStatus(response.message ?? "SSH 目标已删除", isError: false)
+                    self.refreshTargets()
+                }
+            } catch {
+                DispatchQueue.main.async { self.setStatus(error.localizedDescription, isError: true) }
+            }
+        }
+    }
 
     var selectedItem: ProxyItem? {
         guard let selection else { return nil }
@@ -76,8 +132,11 @@ final class AppState: ObservableObject {
                 let items = (response.rows ?? []).map {
                     ProxyItem(definition: $0.definition, runtime: $0.runtime)
                 }
+                let targetResponse = try? self.kernel.client.call(.targets())
+                let targets = (targetResponse?.targets ?? []).sorted { $0.name < $1.name }
                 DispatchQueue.main.async {
                     self.items = items
+                    self.targets = targets
                     self.kernelReady = true
                     if let selection = self.selection, !items.contains(where: { $0.definition.name == selection }) {
                         self.selection = items.first?.definition.name

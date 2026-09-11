@@ -131,6 +131,53 @@ struct Forward: Codable, Hashable, Identifiable {
     }
 }
 
+/// 可复用的命名 SSH 目标：定义一次，多个代理按名字引用。
+struct SSHTarget: Codable, Hashable, Identifiable {
+    var name: String
+    var user: String = ""
+    var host: String = ""
+    var port: Int = 22
+    var identity: String = ""
+    var extraArgs: [String] = []
+
+    enum CodingKeys: String, CodingKey {
+        case name
+        case user
+        case host
+        case port
+        case identity
+        case extraArgs = "extra_args"
+    }
+
+    init(name: String, user: String = "", host: String = "", port: Int = 22,
+         identity: String = "", extraArgs: [String] = []) {
+        self.name = name
+        self.user = user
+        self.host = host
+        self.port = port
+        self.identity = identity
+        self.extraArgs = extraArgs
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        name = try container.decode(String.self, forKey: .name)
+        user = try container.decodeIfPresent(String.self, forKey: .user) ?? ""
+        host = try container.decodeIfPresent(String.self, forKey: .host) ?? ""
+        port = try container.decodeIfPresent(Int.self, forKey: .port) ?? 22
+        identity = try container.decodeIfPresent(String.self, forKey: .identity) ?? ""
+        extraArgs = try container.decodeIfPresent([String].self, forKey: .extraArgs) ?? []
+    }
+
+    var id: String { name }
+
+    var asTarget: Target {
+        Target(user: user, host: host, port: port == 0 ? 22 : port, identity: identity, extraArgs: extraArgs)
+    }
+
+    var address: String { asTarget.address }
+}
+
 struct Target: Codable, Hashable {
     var user: String = ""
     var host: String = ""
@@ -196,6 +243,7 @@ struct ProxyDefinition: Codable, Hashable, Identifiable {
     var name: String
     var direction: ProxyDirection
     var target: Target
+    var targetRef: String = ""
     var forwards: [Forward]
     var restart: RestartPolicy
     var backoff: Backoff
@@ -205,6 +253,7 @@ struct ProxyDefinition: Codable, Hashable, Identifiable {
         case name
         case direction
         case target
+        case targetRef = "target_ref"
         case forwards
         case restart
         case backoff
@@ -213,11 +262,12 @@ struct ProxyDefinition: Codable, Hashable, Identifiable {
 
     var id: String { name }
 
-    init(name: String, direction: ProxyDirection, target: Target, forwards: [Forward],
+    init(name: String, direction: ProxyDirection, target: Target, targetRef: String = "", forwards: [Forward],
          restart: RestartPolicy = .onFailure, backoff: Backoff = Backoff(), autostart: Bool = true) {
         self.name = name
         self.direction = direction
         self.target = target
+        self.targetRef = targetRef
         self.forwards = forwards
         self.restart = restart
         self.backoff = backoff
@@ -228,6 +278,7 @@ struct ProxyDefinition: Codable, Hashable, Identifiable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         name = try container.decode(String.self, forKey: .name)
         target = try container.decodeIfPresent(Target.self, forKey: .target) ?? Target()
+        targetRef = try container.decodeIfPresent(String.self, forKey: .targetRef) ?? ""
         forwards = try container.decodeIfPresent([Forward].self, forKey: .forwards) ?? []
         restart = try container.decodeIfPresent(RestartPolicy.self, forKey: .restart) ?? .onFailure
         backoff = try container.decodeIfPresent(Backoff.self, forKey: .backoff) ?? Backoff()
@@ -255,7 +306,10 @@ struct ProxyDefinition: Codable, Hashable, Identifiable {
         if trimmedName.unicodeScalars.contains(where: { !allowed.contains($0) }) {
             return "名称只允许字母、数字、点、下划线和连字符"
         }
-        if target.host.trimmingCharacters(in: .whitespaces).isEmpty { return "SSH 目标不能为空" }
+        if targetRef.trimmingCharacters(in: .whitespaces).isEmpty,
+           target.host.trimmingCharacters(in: .whitespaces).isEmpty {
+            return "SSH 目标不能为空，或选择复用已保存的目标"
+        }
         if forwards.isEmpty { return "至少需要一条转发规则" }
         for (index, forward) in forwards.enumerated() {
             if !direction.allowedForwardTypes.contains(forward.type) {

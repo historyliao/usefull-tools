@@ -11,7 +11,8 @@ struct ProxyManagerApp: App {
     @StateObject private var state = AppState.shared
 
     var body: some Scene {
-        WindowGroup(id: "main") {
+        // Window 是单实例场景：重复 openWindow(id:) 只会把已有窗口置前，不会开出第二个
+        Window("SSH 代理", id: "main") {
             ContentView()
                 .environmentObject(state)
         }

@@ -1,0 +1,26 @@
+{
+  "manifest_version": 3,
+  "name": "Markdown Viewer (GFM)",
+  "version": "0.1.0",
+  "description": "就地渲染 Markdown：GFM、代码高亮、KaTeX 公式、Mermaid 图，支持本地文件与 raw 链接。",
+  "minimum_chrome_version": "120",
+  "permissions": ["scripting"],
+  "host_permissions": ["http://*/*", "https://*/*", "file:///*"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*", "file:///*"],
+      "js": ["content.js"],
+      "run_at": "document_end",
+      "all_frames": false
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["fonts/*"],
+      "matches": ["http://*/*", "https://*/*", "file:///*"]
+    }
+  ]
+}

@@ -153,6 +153,28 @@ ping | list | logs | start | stop | restart | delete | add | update | shutdown
 started_at / restarts / last_exit_code / last_exit_at / last_error`。
 `proc_start_time` 与 `proc_cmdline` 不能省：只凭 pid 判活会被 PID 复用骗到，可能误杀无关进程。
 
+### 可复用 SSH 目标
+
+`config.json` 顶层多一个 `targets` 数组，代理可以按名字引用，避免每条代理重复填同一台机器：
+
+```json
+{
+  "targets": [
+    { "name": "hhdev", "user": "lyy", "host": "hhdev", "port": 12880, "identity": "~/.ssh/id_rsa" }
+  ],
+  "proxies": [
+    { "name": "chrome-9223", "direction": "reverse", "target_ref": "hhdev", "forwards": [ … ] }
+  ]
+}
+```
+
+语义与兼容：
+
+- `target_ref` 非空 → 用 `targets` 里的定义解析；为空 → 用代理内联的 `target`（老配置行为不变，两种可共存）
+- 解析发生在 spawn 前，日志里记录的仍是**展开后的完整 ssh 命令**；引用缺失会在启动时报错并进入失败状态，而不是静默回退
+- 删除目标时若仍被代理引用 → 拒绝并在报错里列出引用它的代理名（避免悬空引用）
+- 改目标不会自动重连已运行的隧道：需要重启该代理（界面里点一次重启）
+
 状态机：`stopped → starting → running → stopping → stopped`，异常分支 `restarting(backoff)` 与 `failed`。
 只有 supervisor 改运行态，界面（App / TUI）只发命令。
 

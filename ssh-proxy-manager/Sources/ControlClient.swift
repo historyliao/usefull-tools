@@ -5,6 +5,7 @@ struct ControlRequest: Encodable {
     var name: String?
     var lines: Int?
     var definition: ProxyDefinition?
+    var target: SSHTarget?
 
     static func ping() -> ControlRequest { ControlRequest(cmd: "ping") }
     static func list() -> ControlRequest { ControlRequest(cmd: "list") }
@@ -16,6 +17,13 @@ struct ControlRequest: Encodable {
     }
     static func save(_ definition: ProxyDefinition, isNew: Bool) -> ControlRequest {
         ControlRequest(cmd: isNew ? "add" : "update", definition: definition)
+    }
+    static func targets() -> ControlRequest { ControlRequest(cmd: "targets") }
+    static func saveTarget(_ target: SSHTarget, isNew: Bool) -> ControlRequest {
+        ControlRequest(cmd: isNew ? "target-add" : "target-update", target: target)
+    }
+    static func deleteTarget(name: String) -> ControlRequest {
+        ControlRequest(cmd: "target-delete", name: name)
     }
 }
 
@@ -31,6 +39,7 @@ struct ControlResponse: Decodable {
     var version: String?
     var managerPID: Int?
     var rows: [ControlRow]?
+    var targets: [SSHTarget]?
     var logs: [String]?
 
     enum CodingKeys: String, CodingKey {
@@ -39,6 +48,7 @@ struct ControlResponse: Decodable {
         case message
         case version
         case rows
+        case targets
         case logs
         case managerPID = "manager_pid"
     }

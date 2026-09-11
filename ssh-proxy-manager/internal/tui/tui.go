@@ -255,11 +255,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.refreshLogs()
 	case "n":
-		m.form = newForm("新建隧道", false, config.Definition{})
+		m.form = newForm("新建隧道", false, config.Definition{}, "")
 		m.mode = modeForm
 	case "e":
 		if row, ok := m.selected(); ok {
-			m.form = newForm("编辑 "+row.Definition.Name, true, row.Definition)
+			m.form = newForm("编辑 "+row.Definition.Name, true, row.Definition, m.mgr.TargetLabel(row.Definition))
 			m.mode = modeForm
 		}
 	case "s":
@@ -450,7 +450,7 @@ func (m Model) visibleRows() []supervisor.Row {
 	out := make([]supervisor.Row, 0, len(m.rows))
 	for _, row := range m.rows {
 		if strings.Contains(strings.ToLower(row.Definition.Name), query) ||
-			strings.Contains(strings.ToLower(row.Definition.Target.Address()), query) {
+			strings.Contains(strings.ToLower(m.mgr.TargetLabel(row.Definition)), query) {
 			out = append(out, row)
 		}
 	}
@@ -525,7 +525,7 @@ func (m Model) listView() string {
 	for i, row := range rows {
 		line := fmt.Sprintf("%-*s %-*s %-*s %-*s %-*s %-*d %s",
 			nameW, truncate(row.Definition.Name, nameW),
-			targetW, truncate(row.Definition.Target.Address(), targetW),
+			targetW, truncate(m.mgr.TargetLabel(row.Definition), targetW),
 			forwardW, truncate(row.Definition.ForwardsDisplay(), forwardW),
 			stateW, row.Runtime.State,
 			pidW, pidText(row.Runtime.PID),
@@ -667,7 +667,7 @@ func (m Model) bodyWidth() int {
 	return width
 }
 
-func newForm(title string, editing bool, def config.Definition) *formState {
+func newForm(title string, editing bool, def config.Definition, sshLabel string) *formState {
 	forwards := ""
 	ssh := ""
 	identity := ""
@@ -676,6 +676,9 @@ func newForm(title string, editing bool, def config.Definition) *formState {
 	if editing {
 		forwards = def.ForwardsDisplay()
 		ssh = def.Target.Address()
+		if def.TargetRef != "" {
+			ssh = sshLabel
+		}
 		identity = def.Target.Identity
 		restart = def.Restart
 		if !def.Autostart {

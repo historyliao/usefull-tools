@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -86,6 +87,8 @@ func main() {
 		os.Exit(cmdList(os.Args[2:]))
 	case "delete", "rm", "remove":
 		os.Exit(cmdDelete(os.Args[2:]))
+	case "target":
+		os.Exit(cmdTarget(os.Args[2:]))
 	case "logs":
 		os.Exit(cmdLogs(os.Args[2:]))
 	case "__guard":
@@ -111,6 +114,10 @@ func usage() {
   spm create --name N --ssh U@H[:P] -R bind:port:dest:port ...
   spm list [--json]                查看定义与运行态
   spm delete <name>                删除定义
+  spm target list                  查看可复用的 SSH 目标
+  spm target add --name N --ssh U@H[:P]   新建 SSH 目标
+  spm target edit --name N [--ssh ...]    修改 SSH 目标
+  spm target remove <name>         删除 SSH 目标（仍被引用时会拒绝）
   spm start|stop|restart <name>    通过控制通道操作运行中的 manager
   spm logs <name> [-f]             查看隧道日志
 
@@ -182,6 +189,7 @@ func cmdCreate(args []string) int {
 	dir := fs.String("dir", "", "状态目录")
 	name := fs.String("name", "", "隧道名称")
 	sshTarget := fs.String("ssh", "", "目标，形如 user@host:port")
+	targetRef := fs.String("target-ref", "", "复用已保存的 SSH 目标（spm target list 查看）")
 	identity := fs.String("identity", "", "私钥路径")
 	restart := fs.String("restart", config.RestartOnFail, "重启策略: always/on-failure/never")
 	autostart := fs.Bool("autostart", true, "manager 启动时自动拉起")
@@ -194,23 +202,30 @@ func cmdCreate(args []string) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	if *name == "" || *sshTarget == "" {
-		fmt.Fprintln(os.Stderr, "错误: --name 与 --ssh 必填")
+	if *name == "" || (*sshTarget == "" && *targetRef == "") {
+		fmt.Fprintln(os.Stderr, "错误: --name 必填，且 --ssh 与 --target-ref 至少给一个")
 		return 2
 	}
-	target, err := config.ParseTarget(*sshTarget)
-	if err != nil {
-		return exitWithError(err)
+	if *sshTarget != "" && *targetRef != "" {
+		return exitWithError(fmt.Errorf("--ssh 与 --target-ref 只能给一个"))
 	}
-	target.Identity = *identity
-	target.ExtraArgs = []string(extraArgs)
 
 	def := config.Definition{
 		Name:      *name,
-		Target:    target,
 		Restart:   *restart,
 		Backoff:   config.DefaultBackoff(),
 		Autostart: *autostart,
+	}
+	if *targetRef != "" {
+		def.TargetRef = *targetRef
+	} else {
+		target, err := config.ParseTarget(*sshTarget)
+		if err != nil {
+			return exitWithError(err)
+		}
+		target.Identity = *identity
+		target.ExtraArgs = []string(extraArgs)
+		def.Target = target
 	}
 	for _, expr := range forwards {
 		f, err := config.ParseForwardExpr(expr)
@@ -248,7 +263,162 @@ func cmdCreate(args []string) int {
 	if err := mgr.AddDefinition(def); err != nil {
 		return exitWithError(err)
 	}
-	fmt.Printf("已写入定义 %s（%s，%s）。启动请运行 spm，隧道生命周期跟随 manager。\n", def.Name, def.Target.Address(), def.ForwardsDisplay())
+	targetLabel := def.Target.Address()
+	if def.TargetRef != "" {
+		targetLabel = "复用 SSH 目标 " + def.TargetRef
+	}
+	fmt.Printf("已写入定义 %s（%s，%s）。启动请运行 spm，隧道生命周期跟随 manager。\n", def.Name, targetLabel, def.ForwardsDisplay())
+	return 0
+}
+
+func cmdTarget(args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "用法: spm target <list|add|edit|remove> ...")
+		return 2
+	}
+	switch args[0] {
+	case "list", "ls":
+		return cmdTargetList(args[1:])
+	case "add":
+		return cmdTargetSave(args[1:], false)
+	case "edit", "update":
+		return cmdTargetSave(args[1:], true)
+	case "remove", "rm", "delete":
+		return cmdTargetRemove(args[1:])
+	default:
+		fmt.Fprintf(os.Stderr, "未知子命令: spm target %s\n", args[0])
+		return 2
+	}
+}
+
+func cmdTargetList(args []string) int {
+	fs := flag.NewFlagSet("target list", flag.ExitOnError)
+	dir := fs.String("dir", "", "状态目录")
+	asJSON := fs.Bool("json", false, "以 JSON 输出")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	p := resolvePaths(*dir)
+	cfg, err := config.Load(p.cfg)
+	if err != nil {
+		return exitWithError(err)
+	}
+	targets := append([]config.SSHTarget(nil), cfg.Targets...)
+	sort.Slice(targets, func(i, j int) bool { return targets[i].Name < targets[j].Name })
+	if *asJSON {
+		data, err := json.MarshalIndent(targets, "", "  ")
+		if err != nil {
+			return exitWithError(err)
+		}
+		fmt.Println(string(data))
+		return 0
+	}
+	if len(targets) == 0 {
+		fmt.Println("暂无 SSH 目标，用 spm target add --name N --ssh user@host[:port] 新建。")
+		return 0
+	}
+	fmt.Printf("%-20s %-28s %-22s %s\n", "NAME", "SSH", "IDENTITY", "USED BY")
+	for _, t := range targets {
+		identity := t.Identity
+		if identity == "" {
+			identity = "-"
+		}
+		used := "-"
+		if usage := cfg.TargetUsage(t.Name); len(usage) > 0 {
+			used = strings.Join(usage, ",")
+		}
+		fmt.Printf("%-20s %-28s %-22s %s\n", t.Name, t.Address(), identity, used)
+	}
+	return 0
+}
+
+func cmdTargetSave(args []string, editing bool) int {
+	fs := flag.NewFlagSet("target", flag.ExitOnError)
+	dir := fs.String("dir", "", "状态目录")
+	name := fs.String("name", "", "目标名称")
+	sshTarget := fs.String("ssh", "", "目标，形如 user@host:port")
+	identity := fs.String("identity", "", "私钥路径")
+	var extraArgs multiFlag
+	fs.Var(&extraArgs, "extra-arg", "透传给 ssh 的额外参数（可重复，每次一个参数）")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *name == "" {
+		fmt.Fprintln(os.Stderr, "错误: --name 必填")
+		return 2
+	}
+	p := resolvePaths(*dir)
+	cfg, err := config.Load(p.cfg)
+	if err != nil {
+		return exitWithError(err)
+	}
+	existing, found := cfg.FindTarget(*name)
+	if editing && !found {
+		return exitWithError(fmt.Errorf("SSH 目标 %q 不存在", *name))
+	}
+	if !editing && found {
+		return exitWithError(fmt.Errorf("SSH 目标 %q 已存在", *name))
+	}
+
+	target := config.SSHTarget{Name: *name}
+	provided := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { provided[f.Name] = true })
+	if editing {
+		target = existing
+	}
+	if provided["ssh"] {
+		parsed, err := config.ParseTarget(*sshTarget)
+		if err != nil {
+			return exitWithError(err)
+		}
+		target.User, target.Host, target.Port = parsed.User, parsed.Host, parsed.Port
+	}
+	if provided["identity"] {
+		target.Identity = *identity
+	}
+	if provided["extra-arg"] {
+		target.ExtraArgs = []string(extraArgs)
+	}
+	if !editing && !provided["ssh"] {
+		fmt.Fprintln(os.Stderr, "错误: 新建目标需要 --ssh")
+		return 2
+	}
+
+	mgr, err := newManager(p)
+	if err != nil {
+		return exitWithError(err)
+	}
+	if editing {
+		err = mgr.UpdateTarget(target)
+	} else {
+		err = mgr.AddTarget(target)
+	}
+	if err != nil {
+		return exitWithError(err)
+	}
+	fmt.Printf("已%s SSH 目标 %s（%s）\n", map[bool]string{true: "更新", false: "新建"}[editing], target.Name, target.Address())
+	return 0
+}
+
+func cmdTargetRemove(args []string) int {
+	fs := flag.NewFlagSet("target remove", flag.ExitOnError)
+	dir := fs.String("dir", "", "状态目录")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	rest := fs.Args()
+	if len(rest) != 1 {
+		fmt.Fprintln(os.Stderr, "用法: spm target remove <name>")
+		return 2
+	}
+	mgr, err := newManager(resolvePaths(*dir))
+	if err != nil {
+		return exitWithError(err)
+	}
+	if err := mgr.DeleteTarget(rest[0]); err != nil {
+		return exitWithError(err)
+	}
+	fmt.Printf("已删除 SSH 目标 %s\n", rest[0])
 	return 0
 }
 
@@ -261,6 +431,10 @@ func cmdList(args []string) int {
 	}
 	p := resolvePaths(*dir)
 	rows, err := supervisor.LoadRows(p.cfg, p.state)
+	if err != nil {
+		return exitWithError(err)
+	}
+	cfg, err := config.Load(p.cfg)
 	if err != nil {
 		return exitWithError(err)
 	}
@@ -285,7 +459,7 @@ func cmdList(args []string) int {
 			items = append(items, item{
 				Name:       row.Definition.Name,
 				Direction:  row.Definition.Direction,
-				Target:     row.Definition.Target.Address(),
+				Target:     cfg.TargetLabel(row.Definition),
 				Forwards:   forwards,
 				State:      row.Runtime.State,
 				PID:        row.Runtime.PID,
@@ -310,7 +484,7 @@ func cmdList(args []string) int {
 		fmt.Printf("%-20s %-6s %-26s %-38s %-11s %-7d %-5d %s\n",
 			row.Definition.Name,
 			row.Definition.DirectionLabel(),
-			row.Definition.Target.Address(),
+			cfg.TargetLabel(row.Definition),
 			truncate(row.Definition.ForwardsDisplay(), 38),
 			row.Runtime.State,
 			row.Runtime.PID,

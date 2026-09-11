@@ -44,6 +44,55 @@ type Target struct {
 	ExtraArgs []string `json:"extra_args,omitempty"`
 }
 
+// SSHTarget 是可复用的命名 SSH 目标：定义一次，多个代理按名字引用。
+type SSHTarget struct {
+	Name      string   `json:"name"`
+	User      string   `json:"user"`
+	Host      string   `json:"host"`
+	Port      int      `json:"port,omitempty"`
+	Identity  string   `json:"identity,omitempty"`
+	ExtraArgs []string `json:"extra_args,omitempty"`
+}
+
+func (t SSHTarget) AsTarget() Target {
+	port := t.Port
+	if port == 0 {
+		port = DefaultSSHPort
+	}
+	return Target{User: t.User, Host: t.Host, Port: port, Identity: t.Identity, ExtraArgs: t.ExtraArgs}
+}
+
+func (t SSHTarget) Address() string {
+	return t.AsTarget().Address()
+}
+
+func NormalizeSSHTarget(t SSHTarget) SSHTarget {
+	t.Name = strings.TrimSpace(t.Name)
+	t.User = strings.TrimSpace(t.User)
+	t.Host = strings.TrimSpace(t.Host)
+	t.Identity = strings.TrimSpace(t.Identity)
+	if t.Port == 0 {
+		t.Port = DefaultSSHPort
+	}
+	return t
+}
+
+func ValidateSSHTarget(t SSHTarget) error {
+	if !namePattern.MatchString(t.Name) {
+		return fmt.Errorf("目标名 %q 非法，只允许字母、数字、点、下划线和连字符，且不能以符号开头", t.Name)
+	}
+	if t.Host == "" {
+		return fmt.Errorf("目标 %s: 缺少主机", t.Name)
+	}
+	if !hostPattern.MatchString(t.Host) {
+		return fmt.Errorf("目标 %s: 主机 %q 含非法字符", t.Name, t.Host)
+	}
+	if t.Port < 1 || t.Port > 65535 {
+		return fmt.Errorf("目标 %s: 端口 %d 超出范围", t.Name, t.Port)
+	}
+	return nil
+}
+
 type Backoff struct {
 	Initial     int `json:"initial"`
 	Max         int `json:"max"`
@@ -54,6 +103,7 @@ type Definition struct {
 	Name      string    `json:"name"`
 	Direction string    `json:"direction,omitempty"`
 	Target    Target    `json:"target"`
+	TargetRef string    `json:"target_ref,omitempty"`
 	Forwards  []Forward `json:"forwards"`
 	Restart   string    `json:"restart"`
 	Backoff   Backoff   `json:"backoff"`
@@ -62,6 +112,7 @@ type Definition struct {
 
 type Config struct {
 	Version int          `json:"version"`
+	Targets []SSHTarget  `json:"targets,omitempty"`
 	Proxies []Definition `json:"proxies"`
 }
 
@@ -86,6 +137,9 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.Version == 0 {
 		cfg.Version = Version
+	}
+	for i := range cfg.Targets {
+		cfg.Targets[i] = NormalizeSSHTarget(cfg.Targets[i])
 	}
 	for i := range cfg.Proxies {
 		cfg.Proxies[i] = Normalize(cfg.Proxies[i])
@@ -127,6 +181,103 @@ func (c *Config) Remove(name string) bool {
 	}
 	c.Proxies = append(c.Proxies[:idx], c.Proxies[idx+1:]...)
 	return true
+}
+
+func (c *Config) FindTarget(name string) (SSHTarget, bool) {
+	for _, t := range c.Targets {
+		if t.Name == name {
+			return t, true
+		}
+	}
+	return SSHTarget{}, false
+}
+
+func (c *Config) TargetIndex(name string) int {
+	for i, t := range c.Targets {
+		if t.Name == name {
+			return i
+		}
+	}
+	return -1
+}
+
+// UpsertTarget 新增或覆盖同名目标。
+func (c *Config) UpsertTarget(t SSHTarget) error {
+	t = NormalizeSSHTarget(t)
+	if err := ValidateSSHTarget(t); err != nil {
+		return err
+	}
+	if idx := c.TargetIndex(t.Name); idx >= 0 {
+		c.Targets[idx] = t
+		return nil
+	}
+	c.Targets = append(c.Targets, t)
+	return nil
+}
+
+func (c *Config) TargetUsage(name string) []string {
+	var used []string
+	for _, def := range c.Proxies {
+		if strings.TrimSpace(def.TargetRef) == name {
+			used = append(used, def.Name)
+		}
+	}
+	return used
+}
+
+// RemoveTarget 删除目标；仍被代理引用时拒绝，避免留下悬空引用。
+func (c *Config) RemoveTarget(name string) error {
+	name = strings.TrimSpace(name)
+	idx := c.TargetIndex(name)
+	if idx < 0 {
+		return fmt.Errorf("目标 %q 不存在", name)
+	}
+	if used := c.TargetUsage(name); len(used) > 0 {
+		return fmt.Errorf("目标 %q 仍被 %d 个代理引用: %s", name, len(used), strings.Join(used, ", "))
+	}
+	c.Targets = append(c.Targets[:idx], c.Targets[idx+1:]...)
+	return nil
+}
+
+// ResolveTarget 返回代理实际使用的 SSH 目标：显式引用优先，否则用内联定义。
+func (c *Config) ResolveTarget(def Definition) (Target, error) {
+	ref := strings.TrimSpace(def.TargetRef)
+	if ref == "" {
+		return def.Target, nil
+	}
+	target, ok := c.FindTarget(ref)
+	if !ok {
+		return Target{}, fmt.Errorf("%s: 引用的 SSH 目标 %q 不存在", def.Name, ref)
+	}
+	return target.AsTarget(), nil
+}
+
+func (c *Config) ValidateDefinition(def Definition) error {
+	if err := Validate(def); err != nil {
+		return err
+	}
+	if strings.TrimSpace(def.TargetRef) != "" {
+		if _, ok := c.FindTarget(strings.TrimSpace(def.TargetRef)); !ok {
+			return fmt.Errorf("%s: 引用的 SSH 目标 %q 不存在", def.Name, def.TargetRef)
+		}
+	}
+	return nil
+}
+
+// TargetLabel 返回用于展示的目标串：引用命名目标时给出解析后的地址并标注引用名。
+func (c *Config) TargetLabel(def Definition) string {
+	ref := strings.TrimSpace(def.TargetRef)
+	target, err := c.ResolveTarget(def)
+	if err != nil {
+		if ref != "" {
+			return "复用 " + ref + "（目标不存在）"
+		}
+		return def.Target.Address()
+	}
+	if ref != "" {
+		return target.Address() + " · 复用 " + ref
+	}
+	return target.Address()
 }
 
 func Normalize(def Definition) Definition {
@@ -190,14 +341,20 @@ func Validate(def Definition) error {
 	if !namePattern.MatchString(def.Name) {
 		return fmt.Errorf("名称 %q 非法，只允许字母、数字、点、下划线和连字符，且不能以符号开头", def.Name)
 	}
-	if def.Target.Host == "" {
-		return fmt.Errorf("%s: 缺少目标主机", def.Name)
-	}
-	if !hostPattern.MatchString(def.Target.Host) {
-		return fmt.Errorf("%s: 目标主机 %q 含非法字符", def.Name, def.Target.Host)
-	}
-	if def.Target.Port < 1 || def.Target.Port > 65535 {
-		return fmt.Errorf("%s: SSH 端口 %d 超出范围", def.Name, def.Target.Port)
+	if ref := strings.TrimSpace(def.TargetRef); ref != "" {
+		if !namePattern.MatchString(ref) {
+			return fmt.Errorf("%s: 目标引用 %q 非法，只允许字母、数字、点、下划线和连字符", def.Name, ref)
+		}
+	} else {
+		if def.Target.Host == "" {
+			return fmt.Errorf("%s: 缺少目标主机（或改用 targets 里的引用）", def.Name)
+		}
+		if !hostPattern.MatchString(def.Target.Host) {
+			return fmt.Errorf("%s: 目标主机 %q 含非法字符", def.Name, def.Target.Host)
+		}
+		if def.Target.Port < 1 || def.Target.Port > 65535 {
+			return fmt.Errorf("%s: SSH 端口 %d 超出范围", def.Name, def.Target.Port)
+		}
 	}
 	if len(def.Forwards) == 0 {
 		return fmt.Errorf("%s: 至少需要一条转发规则", def.Name)

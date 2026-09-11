@@ -145,11 +145,11 @@ func (m *Manager) Definition(name string) (config.Definition, bool) {
 
 func (m *Manager) AddDefinition(def config.Definition) error {
 	def = config.Normalize(def)
-	if err := config.Validate(def); err != nil {
-		return err
-	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if err := m.cfg.ValidateDefinition(def); err != nil {
+		return err
+	}
 	if _, ok := m.instances[def.Name]; ok {
 		return fmt.Errorf("隧道 %q 已存在", def.Name)
 	}
@@ -170,11 +170,11 @@ func (m *Manager) AddDefinition(def config.Definition) error {
 
 func (m *Manager) UpdateDefinition(def config.Definition) error {
 	def = config.Normalize(def)
-	if err := config.Validate(def); err != nil {
-		return err
-	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if err := m.cfg.ValidateDefinition(def); err != nil {
+		return err
+	}
 	inst, ok := m.instances[def.Name]
 	if !ok {
 		return fmt.Errorf("隧道 %q 不存在", def.Name)
@@ -219,6 +219,72 @@ func (m *Manager) DeleteDefinition(name string) error {
 	m.mu.Unlock()
 	m.persist()
 	return nil
+}
+
+// Targets 返回当前配置里的可复用 SSH 目标（按名称排序）。
+func (m *Manager) Targets() []config.SSHTarget {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]config.SSHTarget, len(m.cfg.Targets))
+	copy(out, m.cfg.Targets)
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
+func (m *Manager) AddTarget(target config.SSHTarget) error {
+	target = config.NormalizeSSHTarget(target)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.cfg.FindTarget(target.Name); ok {
+		return fmt.Errorf("SSH 目标 %q 已存在", target.Name)
+	}
+	previous := append([]config.SSHTarget(nil), m.cfg.Targets...)
+	if err := m.cfg.UpsertTarget(target); err != nil {
+		return err
+	}
+	if err := m.cfg.Save(m.cfgPath); err != nil {
+		m.cfg.Targets = previous
+		return err
+	}
+	return nil
+}
+
+func (m *Manager) UpdateTarget(target config.SSHTarget) error {
+	target = config.NormalizeSSHTarget(target)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.cfg.FindTarget(target.Name); !ok {
+		return fmt.Errorf("SSH 目标 %q 不存在", target.Name)
+	}
+	previous := append([]config.SSHTarget(nil), m.cfg.Targets...)
+	if err := m.cfg.UpsertTarget(target); err != nil {
+		return err
+	}
+	if err := m.cfg.Save(m.cfgPath); err != nil {
+		m.cfg.Targets = previous
+		return err
+	}
+	return nil
+}
+
+func (m *Manager) DeleteTarget(name string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	previous := append([]config.SSHTarget(nil), m.cfg.Targets...)
+	if err := m.cfg.RemoveTarget(name); err != nil {
+		return err
+	}
+	if err := m.cfg.Save(m.cfgPath); err != nil {
+		m.cfg.Targets = previous
+		return err
+	}
+	return nil
+}
+
+func (m *Manager) TargetLabel(def config.Definition) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.cfg.TargetLabel(def)
 }
 
 func (m *Manager) conflictLocked(def config.Definition) error {
@@ -510,6 +576,13 @@ func (m *Manager) spawn(inst *instance, gen int) error {
 		return nil
 	}
 	def := inst.def
+	target, err := m.cfg.ResolveTarget(def)
+	if err != nil {
+		m.mu.Unlock()
+		return m.failSpawn(inst, gen, err)
+	}
+	resolved := def
+	resolved.Target = target
 	inst.runtime.State = store.StateStarting
 	if inst.attempts > 0 {
 		inst.runtime.Restarts++
@@ -525,7 +598,7 @@ func (m *Manager) spawn(inst *instance, gen int) error {
 	if err := os.MkdirAll(m.logDir, 0o700); err != nil {
 		return m.failSpawn(inst, gen, err)
 	}
-	_ = logging.Append(logPath, fmt.Sprintf("# %s 启动: %s", time.Now().Format(time.RFC3339), strings.Join(sshcmd.Args(m.sshBin, def), " ")))
+	_ = logging.Append(logPath, fmt.Sprintf("# %s 启动: %s", time.Now().Format(time.RFC3339), strings.Join(sshcmd.Args(m.sshBin, resolved), " ")))
 
 	deathR, deathW, err := os.Pipe()
 	if err != nil {
@@ -546,7 +619,7 @@ func (m *Manager) spawn(inst *instance, gen int) error {
 		return m.failSpawn(inst, gen, err)
 	}
 
-	argv := sshcmd.Args(m.sshBin, def)
+	argv := sshcmd.Args(m.sshBin, resolved)
 	guardArgv := append([]string{"__guard", "--name", def.Name, "--"}, argv...)
 	cmd := exec.Command(execPath, guardArgv...)
 	cmd.ExtraFiles = []*os.File{deathR, statusW}

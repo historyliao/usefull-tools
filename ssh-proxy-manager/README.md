@@ -44,6 +44,25 @@ make run
 每行右侧的按钮直接启停，选中后右侧是详情与日志。常用操作：全部启动/全部停止、编辑、删除、菜单栏图标里快速启停、
 `⌘N` 新建。
 
+### SSH 目标（多代理复用同一台机器）
+
+目标可以**单独建一次**，多个代理直接选，不用每条代理重复填一遍：
+
+- 界面：工具栏「SSH 目标」→ 新建/编辑/删除；代理编辑页的「SSH 目标」下拉里直接选（选「自定义」则与以前一样手填）
+- 命令行：
+
+```bash
+spm target list                                              # 看目标 + 被哪些代理引用
+spm target add --name hhdev --ssh lyy@host:12880 --identity ~/.ssh/id_rsa
+spm create --name chrome-9223 --target-ref hhdev -R 127.0.0.1:9223:127.0.0.1:9222
+```
+
+语义：
+
+- 定义里写 `target_ref` 就按引用解析，写 `target` 就是内联（老配置行为不变，两种可以共存）
+- 改目标后，引用它的代理**重启后生效**（列表详情里会显示「解析为 user@host:port · 复用 <名字>」）
+- 目标仍被代理引用时**拒绝删除**，报错里会列出引用它的代理名
+
 ### 命令行
 
 ```bash
@@ -223,6 +242,17 @@ spm delete expose-socks
 `curl --socks5-hostname 127.0.0.1:18081 https://example.com` 返回真实页面；`spm delete` 两条定义后远端 18081 立即释放。
 
 ## 命令
+
+### target 子命令
+
+```bash
+spm target list [--json]
+spm target add  --name N --ssh U@H[:P] [--identity ~/.ssh/id_rsa] [--extra-arg -o --extra-arg Foo=bar]
+spm target edit --name N [--ssh ...] [--identity ...]     # 只覆盖给出的字段
+spm target remove <name>                                  # 仍被引用时会拒绝
+```
+
+`spm create` / `spm list` 也支持引用：`--target-ref <name>`；`spm list` 的目标列会显示解析后的地址与引用名。
 
 | 命令 | 说明 |
 | --- | --- |

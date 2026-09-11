@@ -366,6 +366,7 @@ struct LogPane: View {
 
 struct MenuBarView: View {
     @EnvironmentObject private var state: AppState
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         Text(state.kernelDescription)
@@ -381,8 +382,14 @@ struct MenuBarView: View {
         }
         Divider()
         Button("显示窗口") {
+            // 窗口被关闭后 NSApp.windows 里没有主窗口，必须让 SwiftUI 重新创建
+            openWindow(id: "main")
             NSApp.activate(ignoringOtherApps: true)
-            NSApp.windows.first?.makeKeyAndOrderFront(nil)
+            DispatchQueue.main.async {
+                for window in NSApp.windows where window.canBecomeMain {
+                    window.makeKeyAndOrderFront(nil)
+                }
+            }
         }
         Button("退出（会关闭所有隧道）") {
             NSApp.terminate(nil)

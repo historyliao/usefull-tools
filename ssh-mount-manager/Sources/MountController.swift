@@ -193,10 +193,16 @@ final class MountController: ObservableObject {
         logs[spec.id] = nil
         failures[spec.id] = nil
         message = "\(spec.name) 已删除"
-        if wasMounted {
-            queue.async { [weak self] in
-                _ = self?.engine.unmount(spec)
-                DispatchQueue.main.async { self?.refresh() }
+        queue.async { [weak self] in
+            guard let self else { return }
+            if wasMounted {
+                _ = self.engine.unmount(spec)
+            }
+            let note = self.engine.removeMountPointIfEmpty(spec)
+            DispatchQueue.main.async {
+                self.store.appendEvent("delete \(spec.name)\(note.map { "（\($0)）" } ?? "，已清理本地空挂载点")")
+                self.message = note.map { "\(spec.name) 已删除：\($0)" } ?? "\(spec.name) 已删除（本地挂载点已清理）"
+                self.refresh()
             }
         }
     }

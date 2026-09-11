@@ -10,7 +10,7 @@ enum CLI {
     static func run() -> Never {
         var args = Array(CommandLine.arguments.dropFirst())
         if args.first == "--cli" { args.removeFirst() }
-        let store = Store()
+        let store = Store(baseDir: takeDirectory(from: &args))
         let engine = MountEngine()
         guard let command = args.first else {
             printUsage()
@@ -48,7 +48,32 @@ enum CLI {
           add --name N --target user@host [--port P] --remote /path --mountpoint /local/path [--identity ~/.ssh/id_rsa] [--option o=...]
           edit --name N [--target user@host] [--port P] [--remote /path] [--mountpoint /local/path]
           mount <name> | unmount <name> | remove <name>
+
+        通用参数: --dir <path>（或环境变量 SPM_DIR）指定状态目录，默认 ~/.ssh-mount-manager
         """)
+    }
+
+    /// 取 --dir / --dir= / SPM_DIR 指定的状态目录，并从参数里摘掉，便于隔离测试。
+    private static func takeDirectory(from args: inout [String]) -> URL? {
+        var index = 0
+        while index < args.count {
+            let arg = args[index]
+            if arg == "--dir", index + 1 < args.count {
+                let path = args[index + 1]
+                args.removeSubrange(index...(index + 1))
+                return URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
+            }
+            if arg.hasPrefix("--dir=") {
+                let path = String(arg.dropFirst("--dir=".count))
+                args.remove(at: index)
+                return URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
+            }
+            index += 1
+        }
+        if let env = ProcessInfo.processInfo.environment["SPM_DIR"], !env.isEmpty {
+            return URL(fileURLWithPath: (env as NSString).expandingTildeInPath)
+        }
+        return nil
     }
 
     private static func list(store: Store, engine: MountEngine) {
@@ -174,7 +199,11 @@ enum CLI {
             exit(1)
         }
         store.remove(id: spec.id)
-        print("已删除 \(name)")
+        if let note = engine.removeMountPointIfEmpty(spec) {
+            print("已删除 \(name)（\(note)）")
+        } else {
+            print("已删除 \(name)，本地挂载点已清理")
+        }
     }
 
     private static func mount(_ args: [String], store: Store, engine: MountEngine) {

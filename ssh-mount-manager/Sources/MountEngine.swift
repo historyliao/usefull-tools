@@ -194,6 +194,30 @@ final class MountEngine {
         try mount(updated, logURL: logURL)
     }
 
+    /// 删除定义后清理本地挂载点：仅在"目录存在、是空目录、且当前没有挂载"时删除。
+    /// 非空目录一律保留（避免误删用户自己的内容），并返回说明。
+    @discardableResult
+    func removeMountPointIfEmpty(_ spec: MountSpec) -> String? {
+        let path = spec.expandedMountPoint
+        var isDirectory: ObjCBool = false
+        guard fileManager.fileExists(atPath: path, isDirectory: &isDirectory), isDirectory.boolValue else {
+            return nil
+        }
+        if mountPoints().contains(path) {
+            return "本地挂载点仍在挂载中，未处理: \(path)"
+        }
+        let contents = (try? fileManager.contentsOfDirectory(atPath: path)) ?? []
+        guard contents.isEmpty else {
+            return "本地挂载点非空，已保留: \(path)"
+        }
+        do {
+            try fileManager.removeItem(atPath: path)
+            return nil
+        } catch {
+            return "本地挂载点删除失败: \(error.localizedDescription)"
+        }
+    }
+
     func logTail(_ spec: MountSpec, logURL: URL, lines: Int = 30) -> [String] {
         guard let handle = try? FileHandle(forReadingFrom: logURL) else { return [] }
         defer { try? handle.close() }

@@ -9,12 +9,13 @@ final class Store: ObservableObject {
     let eventsURL: URL
     private let configURL: URL
 
-    init() {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        baseDir = home.appendingPathComponent(".ssh-mount-manager", isDirectory: true)
-        logDir = baseDir.appendingPathComponent("logs", isDirectory: true)
-        eventsURL = baseDir.appendingPathComponent("events.log")
-        configURL = baseDir.appendingPathComponent("mounts.json")
+    init(baseDir base: URL? = nil) {
+        let root = base ?? FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".ssh-mount-manager", isDirectory: true)
+        baseDir = root
+        logDir = root.appendingPathComponent("logs", isDirectory: true)
+        eventsURL = root.appendingPathComponent("events.log")
+        configURL = root.appendingPathComponent("mounts.json")
         try? FileManager.default.createDirectory(at: logDir, withIntermediateDirectories: true)
         load()
     }

@@ -56,7 +56,7 @@ struct ContentView: View {
             }
             Button("取消", role: .cancel) { pendingDelete = nil }
         } message: {
-            Text("将先卸载「\(pendingDelete?.name ?? "")」，再删除该定义。远端文件不受影响。")
+            Text("将先卸载「\(pendingDelete?.name ?? "")」，再删除该定义；本地挂载点目录若为空会一并删掉（非空则保留）。远端文件不受影响。")
         }
     }
 

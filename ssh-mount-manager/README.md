@@ -23,13 +23,13 @@ sudo "$MACFUSE" kernel-extension load
 ```bash
 cd ssh-mount-manager
 
-make build          # 只构建到 ./build/SSH Mount Manager.app（不注册，不进启动台）
+make build          # 只构建到 /tmp/ssh-mount-manager-build（刻意不落在被索引的目录，不进启动台）
 make install        # 构建 + 停旧实例 + 安装到 /Applications + 注册，并移除仓库内的构建副本
 make run            # 等价于 make install 后打开 /Applications 里的那份
 make cli            # 安装后用无界面模式列出所有挂载
 ```
 
-说明：只有 `/Applications` 那一份会被注册进 LaunchServices；仓库里的构建副本在 `build.sh` 结束时会自动注销，`make install` 还会直接把它删掉，避免启动台出现两份同名应用。
+说明：只有 `/Applications` 那一份会被注册进 LaunchServices。构建产物默认输出到 `/tmp/ssh-mount-manager-build/`（该目录不被 Spotlight 索引，且 `build.sh` 结束时会主动注销），避免启动台出现第二份同名应用。
 
 ### 升级流程（重要）
 
@@ -109,7 +109,7 @@ ssh -s ... sftp → 远端 sshd → 远端目录
 - sshfs 不会自行后台化，必须 `-f` 并由 app / tmux 托管，否则命令不返回
 - 不要使用 `-o dir_cache=no`，会触发 `sftp_readdir_async` 断言崩溃并留下死挂载；用 `-o dcache_timeout=5` 兼顾时效与稳定
 - 卷卡死（`Device not configured`、`mount` 阻塞）时用界面里的「强制清理」或 `--cli force-unmount <name>`，无需重启
-- 启动台里出现两份「SSH Mount Manager」：说明仓库里的构建副本也被注册了。处理：`lsregister -u "<仓库>/build/SSH Mount Manager.app"` → 删掉该副本 → `killall Dock` 刷新启动台
+- 启动台里出现两份「SSH Mount Manager」：说明除 `/Applications` 外的构建副本被 Spotlight 索引并自动注册进了 LaunchServices。处理：`lsregister -u "<多余副本路径>"` → 移走该副本 → `killall Dock` 刷新启动台。构建产物本就不应放在被索引的目录里（`make build` 默认输出到 `/tmp/ssh-mount-manager-build`）
 
 ## 相关文档
 

@@ -5,9 +5,13 @@ ROOT="$(cd "$(dirname "$0")" && pwd)"
 APP_NAME="SSH Mount Manager"
 EXEC_NAME="SSHMountManager"
 BUNDLE_ID="com.historyliao.ssh-mount-manager"
-BUNDLE="$ROOT/build/$APP_NAME.app"
+OUT_ROOT="${1:-/tmp/ssh-mount-manager-build}"
+BUNDLE="$OUT_ROOT/$APP_NAME.app"
 
 mkdir -p "$BUNDLE/Contents/MacOS" "$BUNDLE/Contents/Resources"
+# 构建产物不落在被 Spotlight 索引的目录里：否则会被自动注册进 LaunchServices，
+# 启动台就会出现第二份同名应用
+touch "$OUT_ROOT/.metadata_never_index"
 
 cat > "$BUNDLE/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

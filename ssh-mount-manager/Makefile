@@ -1,4 +1,5 @@
-APP := build/SSH Mount Manager.app
+STAGE := /tmp/ssh-mount-manager-build
+APP := $(STAGE)/SSH Mount Manager.app
 INSTALLED := /Applications/SSH Mount Manager.app
 BIN := $(INSTALLED)/Contents/MacOS/SSHMountManager
 LSREGISTER := /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
@@ -6,7 +7,7 @@ LSREGISTER := /System/Library/Frameworks/CoreServices.framework/Frameworks/Launc
 .PHONY: build run install cli clean
 
 build:
-	./build.sh
+	./build.sh "$(STAGE)"
 
 run: install
 	open "$(INSTALLED)"

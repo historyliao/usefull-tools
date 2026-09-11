@@ -13,10 +13,14 @@
 
 ```bash
 cd ssh-proxy-manager
-make build          # 产出 build/SSH Proxy Manager.app
-make run            # 直接打开
-open "build/SSH Proxy Manager.app"
+make build          # 构建到 /tmp/ssh-proxy-manager-build（刻意不落在被 Spotlight 索引的目录，不进启动台）
+make install        # 安装到 /Applications/SSH Proxy Manager.app 并注册 LaunchServices
+make run            # 等价于 make install 后打开 /Applications 里的那份
 ```
+
+说明：只有 `/Applications` 那一份会被注册进 LaunchServices。构建产物默认输出到
+`/tmp/ssh-proxy-manager-build/`（不被 Spotlight 索引，`build.sh` 结束时会主动注销），
+避免启动台出现第二份同名应用。
 
 只想用命令行：
 

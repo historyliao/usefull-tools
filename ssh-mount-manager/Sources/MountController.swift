@@ -65,6 +65,7 @@ final class MountController: ObservableObject {
         statuses[spec.id] = .mounting
         message = "\(spec.name) 挂载中…"
         let logURL = store.logPath(for: spec)
+        let existedBefore = engine.mountPointExists(spec)
         queue.async { [weak self] in
             guard let self else { return }
             do {
@@ -81,6 +82,9 @@ final class MountController: ObservableObject {
             }
             Thread.sleep(forTimeInterval: 0.8)
             DispatchQueue.main.async {
+                if !existedBefore {
+                    self.store.noteMountPointCreated(spec.expandedMountPoint)
+                }
                 self.store.appendEvent("mount \(spec.name) 已发起，状态 \(self.status(of: spec).label)")
                 self.refresh()
                 self.loadLog(spec)
@@ -193,10 +197,20 @@ final class MountController: ObservableObject {
         logs[spec.id] = nil
         failures[spec.id] = nil
         message = "\(spec.name) 已删除"
-        if wasMounted {
-            queue.async { [weak self] in
-                _ = self?.engine.unmount(spec)
-                DispatchQueue.main.async { self?.refresh() }
+        queue.async { [weak self] in
+            guard let self else { return }
+            if wasMounted {
+                _ = self.engine.unmount(spec)
+            }
+            let createdByApp = self.store.wasMountPointCreated(spec.expandedMountPoint)
+            let note = self.engine.removeMountPointIfEmpty(spec, createdByApp: createdByApp)
+            if note == nil {
+                self.store.forgetMountPoint(spec.expandedMountPoint)
+            }
+            DispatchQueue.main.async {
+                self.store.appendEvent("delete \(spec.name)\(note.map { "（\($0)）" } ?? "，已清理本地空挂载点")")
+                self.message = note.map { "\(spec.name) 已删除：\($0)" } ?? "\(spec.name) 已删除（本地挂载点已清理）"
+                self.refresh()
             }
         }
     }

@@ -93,6 +93,24 @@ final class MountEngine {
         isMounted(spec, in: mountPoints())
     }
 
+    /// 挂载点目录当前是否已存在（判断目录是"我们建的"还是"用户原有的"）。
+    func mountPointExists(_ spec: MountSpec) -> Bool {
+        var isDirectory: ObjCBool = false
+        let path = spec.expandedMountPoint
+        return fileManager.fileExists(atPath: path, isDirectory: &isDirectory) && isDirectory.boolValue
+    }
+
+    /// 路径本身是否是一个挂载点（与父目录的 fsid 不同即视为挂载点）。
+    /// 用途：挂载点位于 /tmp 这类软链路径时，挂载表里记的是 /private/tmp，字符串比较会漏判。
+    func isMountPoint(_ path: String) -> Bool {
+        var child = statfs()
+        var parent = statfs()
+        guard statfs(path, &child) == 0 else { return false }
+        let parentPath = (path as NSString).deletingLastPathComponent
+        guard !parentPath.isEmpty, statfs(parentPath, &parent) == 0 else { return false }
+        return child.f_fsid.val.0 != parent.f_fsid.val.0 || child.f_fsid.val.1 != parent.f_fsid.val.1
+    }
+
     func isMounted(_ spec: MountSpec, in points: Set<String>) -> Bool {
         let path = spec.expandedMountPoint
         if points.contains(path) { return true }
@@ -112,9 +130,10 @@ final class MountEngine {
     func mount(_ spec: MountSpec, logURL: URL) throws {
         guard let sshfs = sshfsPath() else { throw EngineError.sshfsNotFound }
         let mountPoint = spec.expandedMountPoint
-        try fileManager.createDirectory(atPath: mountPoint, withIntermediateDirectories: true)
-        guard fileManager.fileExists(atPath: mountPoint) else {
-            throw EngineError.mountPointMissing(mountPoint)
+        // 挂载点目录由 macFUSE 自动创建（含缺失的父目录，已实测）；这里只拦"同名文件"这种明显错误
+        var isDirectory: ObjCBool = false
+        if fileManager.fileExists(atPath: mountPoint, isDirectory: &isDirectory), !isDirectory.boolValue {
+            throw EngineError.mountPointMissing("\(mountPoint) 已存在且不是目录")
         }
         try fileManager.createDirectory(at: logURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         if !fileManager.fileExists(atPath: logURL.path) {
@@ -165,7 +184,8 @@ final class MountEngine {
             }
         }
 
-        guard mountPoints().contains(mountPoint) else { return nil }
+        // 必须用软链感知的判断：/tmp 在挂载表里写作 /private/tmp，直接比字符串会漏判
+        guard isMounted(spec, in: mountPoints()) || isMountPoint(mountPoint) else { return nil }
 
         let direct = shell("/sbin/umount", [mountPoint])
         if direct.status == 0 { return nil }
@@ -192,6 +212,34 @@ final class MountEngine {
     func remount(_ updated: MountSpec, previous: MountSpec, logURL: URL) throws {
         _ = unmount(previous)
         try mount(updated, logURL: logURL)
+    }
+
+    /// 删除定义后清理本地挂载点：仅在"目录存在、是空目录、且当前没有挂载"时删除。
+    /// 非空目录一律保留（避免误删用户自己的内容），并返回说明。
+    @discardableResult
+    func removeMountPointIfEmpty(_ spec: MountSpec, createdByApp: Bool) -> String? {
+        let path = spec.expandedMountPoint
+        var isDirectory: ObjCBool = false
+        guard fileManager.fileExists(atPath: path, isDirectory: &isDirectory), isDirectory.boolValue else {
+            return nil
+        }
+        if isMounted(spec, in: mountPoints()) || isMountPoint(path) {
+            return "本地挂载点仍在挂载中，未处理: \(path)"
+        }
+        let contents = (try? fileManager.contentsOfDirectory(atPath: path)) ?? []
+        guard contents.isEmpty else {
+            return "本地挂载点非空，已保留: \(path)"
+        }
+        // 只清理本 App 挂载时创建的目录；用户自己准备的目录一律保留
+        guard createdByApp else {
+            return "本地挂载点不是本 App 创建的，已保留: \(path)"
+        }
+        do {
+            try fileManager.removeItem(atPath: path)
+            return nil
+        } catch {
+            return "本地挂载点删除失败: \(error.localizedDescription)"
+        }
     }
 
     func logTail(_ spec: MountSpec, logURL: URL, lines: Int = 30) -> [String] {

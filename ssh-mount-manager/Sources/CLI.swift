@@ -199,9 +199,11 @@ enum CLI {
             exit(1)
         }
         store.remove(id: spec.id)
-        if let note = engine.removeMountPointIfEmpty(spec) {
+        let createdByApp = store.wasMountPointCreated(spec.expandedMountPoint)
+        if let note = engine.removeMountPointIfEmpty(spec, createdByApp: createdByApp) {
             print("已删除 \(name)（\(note)）")
         } else {
+            store.forgetMountPoint(spec.expandedMountPoint)
             print("已删除 \(name)，本地挂载点已清理")
         }
     }
@@ -216,7 +218,11 @@ enum CLI {
             return
         }
         do {
+            let existedBefore = engine.mountPointExists(spec)
             try engine.mount(spec, logURL: store.logPath(for: spec))
+            if !existedBefore {
+                store.noteMountPointCreated(spec.expandedMountPoint)
+            }
         } catch {
             store.appendEvent("mount \(name) 失败: \(error.localizedDescription)")
             print("挂载失败: \(error.localizedDescription)")

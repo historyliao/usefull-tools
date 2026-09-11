@@ -8,6 +8,9 @@ final class Store: ObservableObject {
     let logDir: URL
     let eventsURL: URL
     private let configURL: URL
+    private let createdDirsURL: URL
+    /// 本 App 挂载时新建出来的挂载点目录（删除时据此判断能否连带清理）。
+    private var createdMountPoints: Set<String> = []
 
     init(baseDir base: URL? = nil) {
         let root = base ?? FileManager.default.homeDirectoryForCurrentUser
@@ -16,6 +19,7 @@ final class Store: ObservableObject {
         logDir = root.appendingPathComponent("logs", isDirectory: true)
         eventsURL = root.appendingPathComponent("events.log")
         configURL = root.appendingPathComponent("mounts.json")
+        createdDirsURL = root.appendingPathComponent("created-mountpoints.json")
         try? FileManager.default.createDirectory(at: logDir, withIntermediateDirectories: true)
         load()
     }
@@ -53,6 +57,39 @@ final class Store: ObservableObject {
 
     func logPath(for spec: MountSpec) -> URL {
         logDir.appendingPathComponent("\(spec.name).log")
+    }
+
+    func loadCreatedMountPoints() {
+        guard let data = try? Data(contentsOf: createdDirsURL),
+              let list = try? JSONDecoder().decode([String].self, from: data) else { return }
+        createdMountPoints = Set(list)
+    }
+
+    func noteMountPointCreated(_ path: String) {
+        loadCreatedMountPoints()
+        guard !createdMountPoints.contains(path) else { return }
+        createdMountPoints.insert(path)
+        saveCreatedMountPoints()
+    }
+
+    func wasMountPointCreated(_ path: String) -> Bool {
+        loadCreatedMountPoints()
+        return createdMountPoints.contains(path)
+    }
+
+    func forgetMountPoint(_ path: String) {
+        loadCreatedMountPoints()
+        guard createdMountPoints.contains(path) else { return }
+        createdMountPoints.remove(path)
+        saveCreatedMountPoints()
+    }
+
+    private func saveCreatedMountPoints() {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        guard let data = try? encoder.encode(createdMountPoints.sorted()) else { return }
+        try? FileManager.default.createDirectory(at: baseDir, withIntermediateDirectories: true)
+        try? data.write(to: createdDirsURL, options: .atomic)
     }
 
     func appendEvent(_ text: String) {

@@ -195,7 +195,7 @@ struct EditSheet: View {
                     TextField("127.0.0.1", text: forward.bindHost)
                 }
                 captioned(listenPortCaption, width: 84) {
-                    TextField("0", value: forward.bindPort, format: .number)
+                    TextField("0", value: forward.bindPort, format: .number.grouping(.never))
                 }
                 if forward.wrappedValue.isSOCKS {
                     captioned("目标", width: 200) {
@@ -213,7 +213,7 @@ struct EditSheet: View {
                         TextField("127.0.0.1", text: forward.destHost)
                     }
                     captioned("目标端口", width: 84) {
-                        TextField("0", value: forward.destPort, format: .number)
+                        TextField("0", value: forward.destPort, format: .number.grouping(.never))
                     }
                 }
             }

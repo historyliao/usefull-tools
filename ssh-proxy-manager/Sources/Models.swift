@@ -22,7 +22,7 @@ enum ProxyDirection: String, Codable, CaseIterable, Identifiable {
 
     var explanation: String {
         switch self {
-        case .reverse: return "把远端端口映射到本机服务（-R），例如远端 9223 → 本机 9222"
+        case .reverse: return "把远端端口映射到本机服务（-R），例如远端 9223 → 本机 9222；不填目标时远端直接开 SOCKS"
         case .forward: return "把本机端口映射到远端服务（-L）或开本地 SOCKS（-D）"
         }
     }
@@ -110,21 +110,26 @@ struct Forward: Codable, Hashable, Identifiable {
         type = try container.decodeIfPresent(String.self, forKey: .type) ?? "R"
         bindHost = try container.decodeIfPresent(String.self, forKey: .bindHost) ?? "127.0.0.1"
         bindPort = try container.decodeIfPresent(Int.self, forKey: .bindPort) ?? 0
-        destHost = try container.decodeIfPresent(String.self, forKey: .destHost) ?? "127.0.0.1"
+        destHost = try container.decodeIfPresent(String.self, forKey: .destHost) ?? ""
         destPort = try container.decodeIfPresent(Int.self, forKey: .destPort) ?? 0
     }
 
     var isSOCKS: Bool { type == "D" }
 
+    /// -R 不指定目标地址时，ssh 会在远端监听一个 SOCKS4/SOCKS5 代理。
+    var isRemoteSocks: Bool { type == "R" && destHost.isEmpty && destPort == 0 }
+
+    var hasDestination: Bool { !(isSOCKS || isRemoteSocks) }
+
     var spec: String {
-        isSOCKS ? "\(bindHost):\(bindPort)" : "\(bindHost):\(bindPort):\(destHost):\(destPort)"
+        hasDestination ? "\(bindHost):\(bindPort):\(destHost):\(destPort)" : "\(bindHost):\(bindPort)"
     }
 
     var display: String { "\(type) \(spec)" }
 
     var summary: String {
         switch type {
-        case "R": return "远端 \(bindPort) → \(destHost):\(destPort)"
+        case "R": return isRemoteSocks ? "远端 SOCKS \(bindPort)" : "远端 \(bindPort) → \(destHost):\(destPort)"
         case "L": return "本地 \(bindPort) → \(destHost):\(destPort)"
         default: return "本地 SOCKS \(bindPort)"
         }
@@ -318,9 +323,9 @@ struct ProxyDefinition: Codable, Hashable, Identifiable {
             if forward.bindPort < 1 || forward.bindPort > 65535 {
                 return "第 \(index + 1) 条转发的绑定端口要在 1-65535"
             }
-            if !forward.isSOCKS {
+            if forward.hasDestination {
                 if forward.destHost.trimmingCharacters(in: .whitespaces).isEmpty {
-                    return "第 \(index + 1) 条转发缺少目标主机"
+                    return "第 \(index + 1) 条转发缺少目标主机（远端 SOCKS 请留空目标）"
                 }
                 if forward.destPort < 1 || forward.destPort > 65535 {
                     return "第 \(index + 1) 条转发的目标端口要在 1-65535"

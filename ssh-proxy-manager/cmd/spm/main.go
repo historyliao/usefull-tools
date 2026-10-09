@@ -111,7 +111,7 @@ func usage() {
   spm                              打开 TUI（终端界面）
   spm run                          无界面 supervisor，界面 App 与脚本都靠它托管隧道
   spm ui                           打开 SSH Proxy Manager 界面 App
-  spm create --name N --ssh U@H[:P] -R bind:port:dest:port ...
+  spm create --name N --ssh U@H[:P] -R bind:port[:dest:port] ...
   spm list [--json]                查看定义与运行态
   spm delete <name>                删除定义
   spm target list                  查看可复用的 SSH 目标
@@ -195,7 +195,7 @@ func cmdCreate(args []string) int {
 	autostart := fs.Bool("autostart", true, "manager 启动时自动拉起")
 	var forwards, forwardR, forwardL, forwardD, extraArgs multiFlag
 	fs.Var(&forwards, "forward", "转发规则，如 \"R 127.0.0.1:9000:192.168.179.3:9000\"（可重复）")
-	fs.Var(&forwardR, "R", "反向转发 bind:port:dest:port（可重复）")
+	fs.Var(&forwardR, "R", "反向转发 bind:port[:dest:port]，省略目标即远端 SOCKS（可重复）")
 	fs.Var(&forwardL, "L", "本地转发 bind:port:dest:port（可重复）")
 	fs.Var(&forwardD, "D", "动态 SOCKS 转发 bind:port（可重复）")
 	fs.Var(&extraArgs, "extra-arg", "透传给 ssh 的额外参数（可重复，每次一个参数）")

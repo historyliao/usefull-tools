@@ -389,6 +389,9 @@ func validateForward(name string, idx int, f Forward) error {
 		if f.BindPort < 1 || f.BindPort > 65535 {
 			return fmt.Errorf("%s: 第 %d 条转发绑定端口 %d 超出范围", name, idx+1, f.BindPort)
 		}
+		if f.IsRemoteSocks() {
+			break
+		}
 		if f.DestHost == "" || !hostPattern.MatchString(f.DestHost) {
 			return fmt.Errorf("%s: 第 %d 条转发的目标主机 %q 非法", name, idx+1, f.DestHost)
 		}
@@ -405,11 +408,19 @@ func validateForward(name string, idx int, f Forward) error {
 	return nil
 }
 
+// IsRemoteSocks 表示 -R 未指定目标地址：ssh 会在远端监听一个 SOCKS4/SOCKS5 代理。
+func (f Forward) IsRemoteSocks() bool {
+	return f.Type == "R" && f.DestHost == "" && f.DestPort == 0
+}
+
 func (f Forward) Spec() string {
 	switch f.Type {
 	case "D":
 		return fmt.Sprintf("%s:%d", f.BindHost, f.BindPort)
 	default:
+		if f.IsRemoteSocks() {
+			return fmt.Sprintf("%s:%d", f.BindHost, f.BindPort)
+		}
 		return fmt.Sprintf("%s:%d:%s:%d", f.BindHost, f.BindPort, f.DestHost, f.DestPort)
 	}
 }
@@ -480,8 +491,19 @@ func ParseForward(kind, spec string) (Forward, error) {
 	parts := strings.Split(strings.TrimSpace(spec), ":")
 	switch kind {
 	case "R", "L":
+		if len(parts) == 2 && kind == "R" {
+			if parts[0] != "" {
+				f.BindHost = parts[0]
+			}
+			bindPort, err := strconv.Atoi(parts[1])
+			if err != nil {
+				return Forward{}, fmt.Errorf("绑定端口 %q 不是数字", parts[1])
+			}
+			f.BindPort = bindPort
+			break
+		}
 		if len(parts) != 4 {
-			return Forward{}, fmt.Errorf("%s 转发需要 bind_host:bind_port:dest_host:dest_port，收到 %q", kind, spec)
+			return Forward{}, fmt.Errorf("%s 转发需要 bind_host:bind_port[:dest_host:dest_port]，收到 %q", kind, spec)
 		}
 		if parts[0] != "" {
 			f.BindHost = parts[0]

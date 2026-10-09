@@ -242,9 +242,33 @@ struct EditSheet: View {
                 captioned(listenPortCaption, width: 84) {
                     TextField("0", value: forward.bindPort, format: .number.grouping(.never))
                 }
+                if draft.direction == .reverse {
+                    Toggle("SOCKS", isOn: Binding(
+                        get: { forward.wrappedValue.isRemoteSocks },
+                        set: { on in
+                            if on {
+                                forward.wrappedValue.destHost = ""
+                                forward.wrappedValue.destPort = 0
+                            } else if forward.wrappedValue.destHost.isEmpty {
+                                forward.wrappedValue.destHost = "127.0.0.1"
+                            }
+                        }
+                    ))
+                    .toggleStyle(.checkbox)
+                    .font(.system(size: 11))
+                    .help("勾上后 -R 不指定目标，ssh 在远端直接开 SOCKS4/SOCKS5 代理")
+                    .padding(.bottom, 3)
+                }
                 if forward.wrappedValue.isSOCKS {
                     captioned("目标", width: 200) {
                         Text("SOCKS 代理，目标由客户端指定")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer(minLength: 0)
+                } else if forward.wrappedValue.isRemoteSocks {
+                    captioned("目标", width: 200) {
+                        Text("远端 SOCKS 代理，目标由客户端指定")
                             .font(.system(size: 11))
                             .foregroundStyle(.secondary)
                     }
@@ -289,7 +313,7 @@ struct EditSheet: View {
                 "远端监听地址写 127.0.0.1 时只有远端机器自己能连；要让别的机器连，得填 0.0.0.0 或远端网卡 IP，并且远端 sshd 要开 GatewayPorts。",
                 "目标地址是在本机侧连接的：127.0.0.1 就是这台 Mac，也可以写本机能访问到的内网地址。",
                 "远端监听端口被占用时 ssh 会立刻退出，内核按退避策略重试，连续失败 5 次后转为「已失败」。",
-                "ssh 没有「远端 SOCKS」：-D 只有本地版本，反向只能一条条配固定目标。要在远端用 SOCKS，就先在本机开一个 SOCKS（正向 -D），再用一条反向代理把那个端口暴露到远端。",
+                "勾上某条转发的「SOCKS」并清空目标后，-R 不指定目标（`-R 地址:端口`），ssh 会在远端直接监听一个 SOCKS4/SOCKS5 代理，目标由连上来的程序运行时指定。",
                 "例：把本机 Chrome 调试端口暴露到远端 → 远端 127.0.0.1:9223 转发到本机 127.0.0.1:9222。",
             ]
         case .forward:
@@ -310,6 +334,9 @@ struct EditSheet: View {
     private func preview(for forward: Forward) -> String {
         switch (draft.direction, forward.isSOCKS) {
         case (.reverse, _):
+            if forward.isRemoteSocks {
+                return "\(remoteHostLabel) \(forward.bindHost):\(forward.bindPort) 提供 SOCKS4/SOCKS5 代理（目标由客户端指定）"
+            }
             return "\(remoteHostLabel) \(forward.bindHost):\(forward.bindPort)  ⇄  本机 \(forward.destHost):\(forward.destPort)"
         case (.forward, true):
             return "本机 \(forward.bindHost):\(forward.bindPort) 提供 SOCKS5 代理"
